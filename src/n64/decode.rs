@@ -20,12 +20,13 @@ struct WindowHeader {
     window_indicator: u8,
     source: Option<(u32, u32)>,
     delta_encoding_len: u32,
-    target_window_len: u32,
+    target_window_len: usize,
     delta_indicator: u8,
-    data_len: u32,
-    inst_len: u32,
-    addr_len: u32,
+    data_len: usize,
+    inst_len: usize,
+    addr_len: usize,
     hash: Option<u32>,
+    len: usize,
 }
 
 struct Window {
@@ -63,6 +64,7 @@ impl VCDiffDecoder {
                 inst_len: 0,
                 addr_len: 0,
                 hash: None,
+                len: 0,
             },
             window: Window {
                 data_index: 0,
@@ -115,16 +117,17 @@ impl VCDiffDecoder {
         };
 
         let delta_encoding_len = read_int(&self.input, &mut self.index);
-        let target_window_len = read_int(&self.input, &mut self.index);
+        let start_index = self.index;
+        let target_window_len = read_int(&self.input, &mut self.index) as usize;
         let delta_indicator = read_byte(&self.input, &mut self.index);
 
         if delta_indicator & (VCD_DATACOMP | VCD_INSTCOMP | VCD_ADDRCOMP) != 0 {
             panic!("Decompression not implemented");
         }
 
-        let data_len = read_int(&self.input, &mut self.index);
-        let inst_len = read_int(&self.input, &mut self.index);
-        let addr_len = read_int(&self.input, &mut self.index);
+        let data_len = read_int(&self.input, &mut self.index) as usize;
+        let inst_len = read_int(&self.input, &mut self.index) as usize;
+        let addr_len = read_int(&self.input, &mut self.index) as usize;
 
         let hash = if window_indicator & VCD_CHECKSUM != 0 {
             Some(u32::from_be_bytes(
@@ -146,24 +149,32 @@ impl VCDiffDecoder {
             inst_len,
             addr_len,
             hash,
+            len: self.index - start_index,
         };
     }
 
     fn decode_window(&mut self) {
         let data_index = self.index;
-        let inst_index = self.window_header.data_len as usize + data_index;
-        let addr_index = self.window_header.inst_len as usize + inst_index;
+        let inst_index = self.window_header.data_len + data_index;
+        let addr_index = self.window_header.inst_len + inst_index;
+
         self.window = Window {
             data_index,
             inst_index,
             addr_index,
         };
-        let a = addr_index;
-        let mut out = Vec::with_capacity(self.window_header.target_window_len as usize);
-        self.index = addr_index + self.window_header.addr_len as usize;
-        while self.window.inst_index < a {
-            let ii = self.input[self.window.inst_index];
-            let (inst1, inst2) = self.code_table.table[ii as usize];
+
+        assert_eq!(
+            self.window_header.delta_encoding_len as usize,
+            addr_index + self.window_header.addr_len + self.window_header.len - self.index
+        );
+
+        let mut out = Vec::with_capacity(self.window_header.target_window_len);
+
+        self.index = addr_index + self.window_header.addr_len;
+
+        while self.window.inst_index < addr_index {
+            let (inst1, inst2) = self.code_table.table[self.input[self.window.inst_index] as usize];
             self.window.inst_index += 1;
             self.decode_instruction(inst1, &mut out);
 
@@ -176,7 +187,6 @@ impl VCDiffDecoder {
         if let Some(hash) = self.window_header.hash {
             assert_eq!(a.hash(), hash);
         }
-
         self.output.append(&mut out);
     }
 
@@ -185,7 +195,7 @@ impl VCDiffDecoder {
             read_int(&self.input, &mut self.window.inst_index)
         } else {
             inst.size
-        };
+        } as usize;
 
         match inst.ty {
             Type::Run => {
@@ -196,9 +206,9 @@ impl VCDiffDecoder {
                 }
             }
             Type::Add => {
-                self.window.data_index += size as usize;
+                self.window.data_index += size;
                 self.input
-                    .get(self.window.data_index - size as usize..self.window.data_index)
+                    .get(self.window.data_index - size..self.window.data_index)
                     .unwrap()
                     .iter()
                     .for_each(|x| out.push(*x));
@@ -212,14 +222,13 @@ impl VCDiffDecoder {
                     &self.input,
                 );
                 if addr < src_sgmt_len {
-                    let src_sgmt_pos = self.window_header.source.unwrap().1 + addr;
-                    for b in &mut self.source[src_sgmt_pos as usize..(src_sgmt_pos + size) as usize]
-                    {
+                    let src_sgmt_pos = (self.window_header.source.unwrap().1 + addr) as usize;
+                    for b in &mut self.source[src_sgmt_pos..src_sgmt_pos + size] {
                         out.push(*b);
                     }
                 } else {
                     let addr = addr - src_sgmt_len;
-                    for i in addr..(addr + size) {
+                    for i in addr..(addr + size as u32) {
                         let b = out[i as usize];
                         out.push(b);
                     }
