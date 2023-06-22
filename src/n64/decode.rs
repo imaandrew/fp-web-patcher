@@ -1,6 +1,7 @@
 use super::{
     cache::AddrCache,
     insts::{CodeTable, Type},
+    read_byte, read_bytes, read_int,
 };
 
 pub struct VCDiffDecoder {
@@ -62,22 +63,22 @@ impl VCDiffDecoder {
     }
 
     pub fn decode(&mut self) -> &[u8] {
-        let header = self.read_bytes(3);
+        let header = read_bytes(3, &self.input, &mut self.index);
         assert!(header == [0xd6, 0xc3, 0xc4]);
         self.seek(1);
 
-        let header_indicator = self.read_byte();
+        let header_indicator = read_byte(&self.input, &mut self.index);
 
-        if header_indicator & VCD_DECOMPRESS != 0 && self.read_byte() != 0 {
+        if header_indicator & VCD_DECOMPRESS != 0 && read_byte(&self.input, &mut self.index) != 0 {
             panic!("Decompression not implemented");
         }
 
-        if header_indicator & VCD_CODETABLE != 0 && self.read_int() != 0 {
+        if header_indicator & VCD_CODETABLE != 0 && read_int(&self.input, &mut self.index) != 0 {
             panic!("custom code table not implemented");
         }
 
         if header_indicator & VCD_APPHEADER != 0 {
-            let len = self.read_int();
+            let len = read_int(&self.input, &mut self.index);
             self.seek(len as usize);
         }
 
@@ -91,27 +92,34 @@ impl VCDiffDecoder {
     }
 
     fn decode_window_header(&mut self) {
-        let window_indicator = self.read_byte();
+        let window_indicator = read_byte(&self.input, &mut self.index);
         let source = if window_indicator & (VCD_SOURCE | VCD_TARGET) != 0 {
-            Some((self.read_int(), self.read_int()))
+            Some((
+                read_int(&self.input, &mut self.index),
+                read_int(&self.input, &mut self.index),
+            ))
         } else {
             None
         };
 
-        let delta_encoding_len = self.read_int();
-        let target_window_len = self.read_int();
-        let delta_indicator = self.read_byte();
+        let delta_encoding_len = read_int(&self.input, &mut self.index);
+        let target_window_len = read_int(&self.input, &mut self.index);
+        let delta_indicator = read_byte(&self.input, &mut self.index);
 
         if delta_indicator & (VCD_DATACOMP | VCD_INSTCOMP | VCD_ADDRCOMP) != 0 {
             panic!("Decompression not implemented");
         }
 
-        let data_len = self.read_int();
-        let inst_len = self.read_int();
-        let addr_len = self.read_int();
+        let data_len = read_int(&self.input, &mut self.index);
+        let inst_len = read_int(&self.input, &mut self.index);
+        let addr_len = read_int(&self.input, &mut self.index);
 
         let hash = if window_indicator & VCD_ALDER32 != 0 {
-            Some(u32::from_be_bytes(self.read_bytes(4).try_into().unwrap()))
+            Some(u32::from_be_bytes(
+                read_bytes(4, &self.input, &mut self.index)
+                    .try_into()
+                    .unwrap(),
+            ))
         } else {
             None
         };
@@ -255,32 +263,6 @@ impl VCDiffDecoder {
         self.output.append(&mut out);
     }
 
-    pub fn read_byte(&mut self) -> u8 {
-        self.index += 1;
-        *self.input.get(self.index - 1).unwrap()
-    }
-
-    fn read_bytes(&mut self, num: usize) -> &[u8] {
-        self.index += num;
-        self.input.get(self.index - num..self.index).unwrap()
-    }
-
-    pub fn read_int(&mut self) -> u32 {
-        let mut result = 0;
-
-        loop {
-            let byte = self.read_byte();
-            let digit = byte & 0x7f;
-            result = (result << 7) | digit as u32;
-
-            if byte & 0x80 == 0 {
-                break;
-            }
-        }
-
-        result
-    }
-
     fn seek(&mut self, num: usize) {
         self.index += num;
     }
@@ -288,25 +270,4 @@ impl VCDiffDecoder {
     fn at_end(&self) -> bool {
         self.index == self.input.len()
     }
-}
-
-fn read_byte(addr: &[u8], index: &mut usize) -> u8 {
-    *index += 1;
-    addr[*index - 1]
-}
-
-fn read_int(addr: &[u8], index: &mut usize) -> u32 {
-    let mut result = 0;
-
-    loop {
-        let byte = read_byte(addr, index);
-        let digit = byte & 0x7f;
-        result = (result << 7) | digit as u32;
-
-        if byte & 0x80 == 0 {
-            break;
-        }
-    }
-
-    result
 }

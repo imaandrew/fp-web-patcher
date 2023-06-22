@@ -1,3 +1,5 @@
+use super::{read_byte, read_int};
+
 pub struct AddrCache {
     near: Vec<u32>,
     next_slot: usize,
@@ -41,25 +43,4 @@ impl AddrCache {
         self.cache_update(addr);
         addr
     }
-}
-
-fn read_byte(addr: &[u8], index: &mut usize) -> u8 {
-    *index += 1;
-    addr[*index - 1]
-}
-
-fn read_int(addr: &[u8], index: &mut usize) -> u32 {
-    let mut result = 0;
-
-    loop {
-        let byte = read_byte(addr, index);
-        let digit = byte & 0x7f;
-        result = (result << 7) | digit as u32;
-
-        if byte & 0x80 == 0 {
-            break;
-        }
-    }
-
-    result
 }
