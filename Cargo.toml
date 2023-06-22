@@ -1,13 +1,14 @@
 [package]
 name = "fp-web-patcher"
 version = "0.1.0"
+authors = ["imaandrew"]
 edition = "2021"
+description = "A wasm application that makes it easy to patch N64 roms for multiple platforms"
+repository = "https://github.com/imaandrew/fp-web-patcher/"
+license = "MIT OR Apache-2.0"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[[bin]]
-name = "fp_web_patcher"
-path = "src/bin/bin.rs"
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 adler32 = "1.2.0"
