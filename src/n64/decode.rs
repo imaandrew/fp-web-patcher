@@ -17,11 +17,9 @@ pub struct VCDiffDecoder {
 
 #[derive(Debug)]
 struct WindowHeader {
-    window_indicator: u8,
     source: (u32, u32),
     delta_encoding_len: u32,
     target_window_len: usize,
-    delta_indicator: u8,
     data_len: usize,
     inst_len: usize,
     addr_len: usize,
@@ -55,11 +53,9 @@ impl VCDiffDecoder {
             output: vec![],
             index: 0,
             window_header: WindowHeader {
-                window_indicator: 0,
                 source: (0, 0),
                 delta_encoding_len: 0,
                 target_window_len: 0,
-                delta_indicator: 0,
                 data_len: 0,
                 inst_len: 0,
                 addr_len: 0,
@@ -141,11 +137,9 @@ impl VCDiffDecoder {
         };
 
         Ok(WindowHeader {
-            window_indicator,
             source,
             delta_encoding_len,
             target_window_len,
-            delta_indicator,
             data_len,
             inst_len,
             addr_len,
