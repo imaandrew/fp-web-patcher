@@ -18,7 +18,7 @@ pub struct VCDiffDecoder {
 #[derive(Debug)]
 struct WindowHeader {
     window_indicator: u8,
-    source: Option<(u32, u32)>,
+    source: (u32, u32),
     delta_encoding_len: u32,
     target_window_len: usize,
     delta_indicator: u8,
@@ -56,7 +56,7 @@ impl VCDiffDecoder {
             index: 0,
             window_header: WindowHeader {
                 window_indicator: 0,
-                source: None,
+                source: (0, 0),
                 delta_encoding_len: 0,
                 target_window_len: 0,
                 delta_indicator: 0,
@@ -76,7 +76,7 @@ impl VCDiffDecoder {
         }
     }
 
-    pub fn decode(&mut self) -> &[u8] {
+    pub fn decode(&mut self) -> Result<&[u8], &'static str> {
         let header = read_bytes(3, &self.input, &mut self.index);
         assert_eq!(*header, [0xd6, 0xc3, 0xc4]);
         self.seek(1);
@@ -84,11 +84,11 @@ impl VCDiffDecoder {
         let header_indicator = read_byte(&self.input, &mut self.index);
 
         if header_indicator & VCD_DECOMPRESS != 0 && read_byte(&self.input, &mut self.index) != 0 {
-            panic!("Decompression not implemented");
+            return Err("Compressed patches not supported");
         }
 
         if header_indicator & VCD_CODETABLE != 0 && read_int(&self.input, &mut self.index) != 0 {
-            panic!("custom code table not implemented");
+            return Err("Custom code tables not supported");
         }
 
         if header_indicator & VCD_APPHEADER != 0 {
@@ -97,23 +97,23 @@ impl VCDiffDecoder {
         }
 
         while !self.at_end() {
-            self.decode_window_header();
-            self.decode_window();
+            self.window_header = self.decode_window_header()?;
+            self.decode_window()?;
             self.addr_cache = AddrCache::default();
         }
 
-        &self.output
+        Ok(&self.output)
     }
 
-    fn decode_window_header(&mut self) {
+    fn decode_window_header(&mut self) -> Result<WindowHeader, &'static str> {
         let window_indicator = read_byte(&self.input, &mut self.index);
         let source = if window_indicator & (VCD_SOURCE | VCD_TARGET) != 0 {
-            Some((
+            (
                 read_int(&self.input, &mut self.index),
                 read_int(&self.input, &mut self.index),
-            ))
+            )
         } else {
-            None
+            (0, 0)
         };
 
         let delta_encoding_len = read_int(&self.input, &mut self.index);
@@ -122,7 +122,7 @@ impl VCDiffDecoder {
         let delta_indicator = read_byte(&self.input, &mut self.index);
 
         if delta_indicator & (VCD_DATACOMP | VCD_INSTCOMP | VCD_ADDRCOMP) != 0 {
-            panic!("Decompression not implemented");
+            return Err("Compressed patches not supported");
         }
 
         let data_len = read_int(&self.input, &mut self.index) as usize;
@@ -131,15 +131,16 @@ impl VCDiffDecoder {
 
         let hash = if window_indicator & VCD_CHECKSUM != 0 {
             Some(u32::from_be_bytes(
-                read_bytes(4, &self.input, &mut self.index)
-                    .try_into()
-                    .unwrap(),
+                match read_bytes(4, &self.input, &mut self.index).try_into() {
+                    Ok(t) => t,
+                    Err(_) => return Err("Invalid checksum"),
+                },
             ))
         } else {
             None
         };
 
-        self.window_header = WindowHeader {
+        Ok(WindowHeader {
             window_indicator,
             source,
             delta_encoding_len,
@@ -150,10 +151,10 @@ impl VCDiffDecoder {
             addr_len,
             hash,
             len: self.index - start_index,
-        };
+        })
     }
 
-    fn decode_window(&mut self) {
+    fn decode_window(&mut self) -> Result<(), &'static str> {
         let data_index = self.index;
         let inst_index = self.window_header.data_len + data_index;
         let addr_index = self.window_header.inst_len + inst_index;
@@ -185,9 +186,13 @@ impl VCDiffDecoder {
 
         let a = adler32::RollingAdler32::from_buffer(&out);
         if let Some(hash) = self.window_header.hash {
-            assert_eq!(a.hash(), hash);
+            if a.hash() != hash {
+                return Err("Checksum doesn't match decoded data");
+            }
         }
         self.output.append(&mut out);
+
+        Ok(())
     }
 
     fn decode_instruction(&mut self, inst: Instruction, out: &mut Vec<u8>) {
@@ -207,14 +212,12 @@ impl VCDiffDecoder {
             }
             Type::Add => {
                 self.window.data_index += size;
-                self.input
-                    .get(self.window.data_index - size..self.window.data_index)
-                    .unwrap()
+                self.input[self.window.data_index - size..self.window.data_index]
                     .iter()
                     .for_each(|x| out.push(*x));
             }
             Type::Copy => {
-                let src_sgmt_len = self.window_header.source.map_or(0, |x| x.0);
+                let src_sgmt_len = self.window_header.source.0;
                 let addr = self.addr_cache.addr_decode(
                     src_sgmt_len + out.len() as u32,
                     inst.mode,
@@ -222,7 +225,7 @@ impl VCDiffDecoder {
                     &self.input,
                 );
                 if addr < src_sgmt_len {
-                    let src_sgmt_pos = (self.window_header.source.unwrap().1 + addr) as usize;
+                    let src_sgmt_pos = (self.window_header.source.1 + addr) as usize;
                     for b in &mut self.source[src_sgmt_pos..src_sgmt_pos + size] {
                         out.push(*b);
                     }
