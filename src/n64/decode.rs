@@ -135,8 +135,6 @@ impl VCDiffDecoder {
             addr_len,
             hash,
         };
-
-        println!("{:#?}", self.window_header);
     }
 
     fn decode_window(&mut self) {
@@ -158,7 +156,6 @@ impl VCDiffDecoder {
 
             match inst1.ty {
                 Type::Run => {
-                    println!("run");
                     let b = self.input[data_index];
                     data_index += 1;
                     for _ in 0..size1 {
@@ -166,7 +163,6 @@ impl VCDiffDecoder {
                     }
                 }
                 Type::Add => {
-                    println!("add");
                     data_index += size1 as usize;
                     self.input
                         .get(data_index - size1 as usize..data_index)
@@ -175,7 +171,6 @@ impl VCDiffDecoder {
                         .for_each(|x| out.push(*x));
                 }
                 Type::Copy => {
-                    println!("copy");
                     let addr = self.addr_cache.addr_decode(
                         self.window_header.source.map_or(0, |x| x.0) + out.len() as u32,
                         inst1.mode,
@@ -183,15 +178,12 @@ impl VCDiffDecoder {
                         &self.input,
                     );
                     if addr < self.window_header.source.unwrap().0 {
-                        println!("COPY LEN {}", size1);
                         let s = self.window_header.source.unwrap().1;
                         for b in &mut self.source[(s + addr) as usize..(s + addr + size1) as usize]
                         {
                             out.push(*b);
                         }
                     } else {
-                        println!("ahh");
-                        println!("COOPY LEN {}", size1);
                         let addr = addr - self.window_header.source.map_or(0, |x| x.0);
                         for i in addr..(addr + size1) {
                             let b = out[i as usize];
@@ -202,7 +194,6 @@ impl VCDiffDecoder {
             }
 
             if let Some(inst2) = inst2 {
-                println!("what the fucjk");
                 let size2 = if inst2.size == 0 {
                     read_int(&self.input, &mut inst_index)
                 } else {
@@ -226,7 +217,6 @@ impl VCDiffDecoder {
                             .for_each(|x| out.push(*x));
                     }
                     Type::Copy => {
-                        println!("copy");
                         let addr = self.addr_cache.addr_decode(
                             self.window_header.source.map_or(0, |x| x.0) + out.len() as u32,
                             inst2.mode,
@@ -234,7 +224,6 @@ impl VCDiffDecoder {
                             &self.input,
                         );
                         if addr < self.window_header.source.unwrap().0 {
-                            println!("copy addr uwu~: {}", addr);
                             let s = self.window_header.source.unwrap().1;
                             for b in
                                 &mut self.source[(s + addr) as usize..(s + addr + size2) as usize]
@@ -242,8 +231,6 @@ impl VCDiffDecoder {
                                 out.push(*b);
                             }
                         } else {
-                            println!("ahh");
-                            println!("COOPY LEN: {}", size2);
                             let addr = addr - self.window_header.source.map_or(0, |x| x.0);
                             for i in addr..(addr + size2) {
                                 let b = out[i as usize];
