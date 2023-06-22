@@ -1,6 +1,6 @@
 use super::{
     cache::AddrCache,
-    insts::{CodeTable, Type},
+    insts::{CodeTable, Instruction, Type},
     read_byte, read_bytes, read_int,
 };
 
@@ -10,6 +10,7 @@ pub struct VCDiffDecoder {
     output: Vec<u8>,
     index: usize,
     window_header: WindowHeader,
+    window: Window,
     code_table: CodeTable,
     addr_cache: AddrCache,
 }
@@ -25,6 +26,12 @@ struct WindowHeader {
     inst_len: u32,
     addr_len: u32,
     hash: Option<u32>,
+}
+
+struct Window {
+    data_index: usize,
+    inst_index: usize,
+    addr_index: usize,
 }
 
 const VCD_DECOMPRESS: u8 = 1;
@@ -57,6 +64,11 @@ impl VCDiffDecoder {
                 addr_len: 0,
                 hash: None,
             },
+            window: Window {
+                data_index: 0,
+                inst_index: 0,
+                addr_index: 0,
+            },
             code_table: CodeTable::default(),
             addr_cache: AddrCache::default(),
         }
@@ -64,7 +76,7 @@ impl VCDiffDecoder {
 
     pub fn decode(&mut self) -> &[u8] {
         let header = read_bytes(3, &self.input, &mut self.index);
-        assert!(header == [0xd6, 0xc3, 0xc4]);
+        assert!(*header == [0xd6, 0xc3, 0xc4]);
         self.seek(1);
 
         let header_indicator = read_byte(&self.input, &mut self.index);
@@ -138,107 +150,25 @@ impl VCDiffDecoder {
     }
 
     fn decode_window(&mut self) {
-        let mut data_index = self.index;
-        let mut inst_index = self.window_header.data_len as usize + data_index;
-        let mut addr_index = self.window_header.inst_len as usize + inst_index;
+        let data_index = self.index;
+        let inst_index = self.window_header.data_len as usize + data_index;
+        let addr_index = self.window_header.inst_len as usize + inst_index;
+        self.window = Window {
+            data_index,
+            inst_index,
+            addr_index,
+        };
         let a = addr_index;
         let mut out = Vec::with_capacity(self.window_header.target_window_len as usize);
         self.index = addr_index + self.window_header.addr_len as usize;
-        while inst_index < a {
-            let ii = self.input[inst_index];
+        while self.window.inst_index < a {
+            let ii = self.input[self.window.inst_index];
             let (inst1, inst2) = self.code_table.table[ii as usize];
-            inst_index += 1;
-            let size1 = if inst1.size == 0 {
-                read_int(&self.input, &mut inst_index)
-            } else {
-                inst1.size
-            };
-
-            match inst1.ty {
-                Type::Run => {
-                    let b = self.input[data_index];
-                    data_index += 1;
-                    for _ in 0..size1 {
-                        out.push(b);
-                    }
-                }
-                Type::Add => {
-                    data_index += size1 as usize;
-                    self.input
-                        .get(data_index - size1 as usize..data_index)
-                        .unwrap()
-                        .iter()
-                        .for_each(|x| out.push(*x));
-                }
-                Type::Copy => {
-                    let addr = self.addr_cache.addr_decode(
-                        self.window_header.source.map_or(0, |x| x.0) + out.len() as u32,
-                        inst1.mode,
-                        &mut addr_index,
-                        &self.input,
-                    );
-                    if addr < self.window_header.source.unwrap().0 {
-                        let s = self.window_header.source.unwrap().1;
-                        for b in &mut self.source[(s + addr) as usize..(s + addr + size1) as usize]
-                        {
-                            out.push(*b);
-                        }
-                    } else {
-                        let addr = addr - self.window_header.source.map_or(0, |x| x.0);
-                        for i in addr..(addr + size1) {
-                            let b = out[i as usize];
-                            out.push(b);
-                        }
-                    }
-                }
-            }
+            self.window.inst_index += 1;
+            self.decode_instruction(inst1, &mut out);
 
             if let Some(inst2) = inst2 {
-                let size2 = if inst2.size == 0 {
-                    read_int(&self.input, &mut inst_index)
-                } else {
-                    inst2.size
-                };
-
-                match inst2.ty {
-                    Type::Run => {
-                        let b = self.input[data_index];
-                        data_index += 1;
-                        for _ in 0..size2 {
-                            out.push(b);
-                        }
-                    }
-                    Type::Add => {
-                        data_index += size2 as usize;
-                        self.input
-                            .get(data_index - size2 as usize..data_index)
-                            .unwrap()
-                            .iter()
-                            .for_each(|x| out.push(*x));
-                    }
-                    Type::Copy => {
-                        let addr = self.addr_cache.addr_decode(
-                            self.window_header.source.map_or(0, |x| x.0) + out.len() as u32,
-                            inst2.mode,
-                            &mut addr_index,
-                            &self.input,
-                        );
-                        if addr < self.window_header.source.unwrap().0 {
-                            let s = self.window_header.source.unwrap().1;
-                            for b in
-                                &mut self.source[(s + addr) as usize..(s + addr + size2) as usize]
-                            {
-                                out.push(*b);
-                            }
-                        } else {
-                            let addr = addr - self.window_header.source.map_or(0, |x| x.0);
-                            for i in addr..(addr + size2) {
-                                let b = out[i as usize];
-                                out.push(b);
-                            }
-                        }
-                    }
-                }
+                self.decode_instruction(inst2, &mut out);
             };
         }
 
@@ -248,6 +178,52 @@ impl VCDiffDecoder {
         }
 
         self.output.append(&mut out);
+    }
+
+    fn decode_instruction(&mut self, inst: Instruction, out: &mut Vec<u8>) {
+        let size = if inst.size == 0 {
+            read_int(&self.input, &mut self.window.inst_index)
+        } else {
+            inst.size
+        };
+
+        match inst.ty {
+            Type::Run => {
+                let b = self.input[self.window.data_index];
+                self.window.data_index += 1;
+                for _ in 0..size {
+                    out.push(b);
+                }
+            }
+            Type::Add => {
+                self.window.data_index += size as usize;
+                self.input
+                    .get(self.window.data_index - size as usize..self.window.data_index)
+                    .unwrap()
+                    .iter()
+                    .for_each(|x| out.push(*x));
+            }
+            Type::Copy => {
+                let addr = self.addr_cache.addr_decode(
+                    self.window_header.source.map_or(0, |x| x.0) + out.len() as u32,
+                    inst.mode,
+                    &mut self.window.addr_index,
+                    &self.input,
+                );
+                if addr < self.window_header.source.unwrap().0 {
+                    let s = self.window_header.source.unwrap().1;
+                    for b in &mut self.source[(s + addr) as usize..(s + addr + size) as usize] {
+                        out.push(*b);
+                    }
+                } else {
+                    let addr = addr - self.window_header.source.map_or(0, |x| x.0);
+                    for i in addr..(addr + size) {
+                        let b = out[i as usize];
+                        out.push(b);
+                    }
+                }
+            }
+        }
     }
 
     fn seek(&mut self, num: usize) {
