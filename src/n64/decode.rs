@@ -40,7 +40,7 @@ const VCD_APPHEADER: u8 = 4;
 
 const VCD_SOURCE: u8 = 1;
 const VCD_TARGET: u8 = 2;
-const VCD_ALDER32: u8 = 4;
+const VCD_CHECKSUM: u8 = 4;
 
 const VCD_DATACOMP: u8 = 1;
 const VCD_INSTCOMP: u8 = 2;
@@ -76,7 +76,7 @@ impl VCDiffDecoder {
 
     pub fn decode(&mut self) -> &[u8] {
         let header = read_bytes(3, &self.input, &mut self.index);
-        assert!(*header == [0xd6, 0xc3, 0xc4]);
+        assert_eq!(*header, [0xd6, 0xc3, 0xc4]);
         self.seek(1);
 
         let header_indicator = read_byte(&self.input, &mut self.index);
@@ -126,7 +126,7 @@ impl VCDiffDecoder {
         let inst_len = read_int(&self.input, &mut self.index);
         let addr_len = read_int(&self.input, &mut self.index);
 
-        let hash = if window_indicator & VCD_ALDER32 != 0 {
+        let hash = if window_indicator & VCD_CHECKSUM != 0 {
             Some(u32::from_be_bytes(
                 read_bytes(4, &self.input, &mut self.index)
                     .try_into()
@@ -204,19 +204,21 @@ impl VCDiffDecoder {
                     .for_each(|x| out.push(*x));
             }
             Type::Copy => {
+                let src_sgmt_len = self.window_header.source.map_or(0, |x| x.0);
                 let addr = self.addr_cache.addr_decode(
-                    self.window_header.source.map_or(0, |x| x.0) + out.len() as u32,
+                    src_sgmt_len + out.len() as u32,
                     inst.mode,
                     &mut self.window.addr_index,
                     &self.input,
                 );
-                if addr < self.window_header.source.unwrap().0 {
-                    let s = self.window_header.source.unwrap().1;
-                    for b in &mut self.source[(s + addr) as usize..(s + addr + size) as usize] {
+                if addr < src_sgmt_len {
+                    let src_sgmt_pos = self.window_header.source.unwrap().1 + addr;
+                    for b in &mut self.source[src_sgmt_pos as usize..(src_sgmt_pos + size) as usize]
+                    {
                         out.push(*b);
                     }
                 } else {
-                    let addr = addr - self.window_header.source.map_or(0, |x| x.0);
+                    let addr = addr - src_sgmt_len;
                     for i in addr..(addr + size) {
                         let b = out[i as usize];
                         out.push(b);
