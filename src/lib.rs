@@ -1,11 +1,18 @@
 use wasm_bindgen::prelude::*;
 
 pub mod n64;
+pub mod wii;
 
 #[wasm_bindgen]
 pub fn n64_decode(rom: Vec<u8>, patch: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut x = n64::decode::VCDiffDecoder::new(patch, rom);
     Ok(x.decode().map(|v| v.to_vec())?)
+}
+
+#[wasm_bindgen]
+pub fn wii_decode(rom: Vec<u8>) {
+    let mut x = wii::decode::Parser::new(rom);
+    x.decode()
 }
 
 #[cfg(test)]
