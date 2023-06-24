@@ -28,4 +28,14 @@ mod tests {
 
         assert_eq!(n64_decode(rom, patch).unwrap(), out);
     }
+
+    #[test]
+    fn test_u8() {
+        let content5 = std::fs::read("tests/content5.app").unwrap();
+        let mut p = wii::u8::U8Unpacker::new(content5.clone());
+        let out = p.unpack();
+        let mut p = wii::u8::U8Packer::new();
+        //std::fs::write("out.bin", p.pack(out)).unwrap()
+        assert_eq!(content5, p.pack(out));
+    }
 }
