@@ -30,6 +30,12 @@ mod tests {
     }
 
     #[test]
+    fn test_wii_decode() {
+        let wad = std::fs::read("tests/test.wad").unwrap();
+        wii_decode(wad);
+    }
+
+    #[test]
     fn test_u8() {
         let content5 = std::fs::read("tests/content5.app").unwrap();
         let mut p = wii::u8::U8Unpacker::new(content5.clone());

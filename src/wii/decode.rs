@@ -8,8 +8,9 @@ const COMMON_KEY: [u8; 16] = [
 ];
 
 #[derive(Debug)]
-struct Wad {
+pub struct Wad {
     header: WadHeader,
+    cert_chain: Vec<Certificate>,
     ticket: Ticket,
     tmd: Title,
     dec_title_key: [u8; 16],
@@ -21,6 +22,7 @@ impl Wad {
     fn new() -> Self {
         Wad {
             header: WadHeader::new(),
+            cert_chain: vec![],
             ticket: Ticket::new(),
             tmd: Title::new(),
             dec_title_key: [0; 16],
@@ -28,6 +30,15 @@ impl Wad {
             footer: vec![],
         }
     }
+
+#[derive(Debug)]
+struct Certificate {
+    sig_type: u32,
+    sig_data: Vec<u8>,
+    issuer: [u8; 64],
+    key_type: u32,
+    child_cert_identity: [u8; 64],
+    pub_key: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -174,16 +185,6 @@ struct ContentRecord {
     hash: [u8; 20],
 }
 
-struct Certificate {
-    sig_type: u32,
-    sig: [u8; 256],
-    issuer: [u8; 0x40],
-    pub_key_type: u32,
-    name: [u8; 0x40],
-    date: u32,
-    key: Vec<u8>,
-}
-
 pub struct Parser {
     data: Vec<u8>,
     index: usize,
@@ -202,7 +203,15 @@ impl Parser {
     pub fn decode(&mut self) {
         self.wad.header = self.parse_wad_header();
         self.align(0x40);
-        self.seek(self.wad.header.certificate_chain_size as usize);
+        let x = self.index;
+        while self.index - x < self.wad.header.certificate_chain_size as usize {
+            let c = self.parse_cert_chain();
+            self.wad.cert_chain.push(c);
+        }
+        assert_eq!(
+            self.index - x,
+            self.wad.header.certificate_chain_size as usize
+        );
         self.align(0x40);
         let x = self.index;
         self.seek(0x140);
@@ -236,6 +245,38 @@ impl Parser {
         }
 
         self.wad.footer = self.get_bytes(self.wad.header.footer_size as usize).into();
+    }
+
+    fn parse_cert_chain(&mut self) -> Certificate {
+        let sig_type = self.get_u32();
+        let sig_len = match sig_type {
+            0x10000 => 0x200,
+            0x10001 => 0x100,
+            0x10002 => 0x3c,
+            _ => panic!("Invalid signature type"),
+        };
+        let sig_data = self.get_bytes(sig_len).into();
+        self.align(0x40);
+        let issuer = self.get_bytes(64).try_into().unwrap();
+        let key_type = self.get_u32();
+        let child_cert_identity = self.get_bytes(64).try_into().unwrap();
+        let pub_key_len = match key_type {
+            0 => 0x23c,
+            1 => 0x13c,
+            2 => 0x78,
+            _ => panic!("Invalid key type"),
+        };
+        let pub_key = self.get_bytes(pub_key_len).into();
+        self.align(0x40);
+
+        Certificate {
+            sig_type,
+            sig_data,
+            issuer,
+            key_type,
+            child_cert_identity,
+            pub_key,
+        }
     }
 
     fn decrypt_title_key(&mut self) {
