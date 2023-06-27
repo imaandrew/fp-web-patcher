@@ -1,5 +1,5 @@
 use wasm_bindgen::prelude::*;
-use wii::decode::Wad;
+use wii::wad::Wad;
 
 pub mod n64;
 pub mod wii;
@@ -11,12 +11,12 @@ pub fn n64_decode(rom: Vec<u8>, patch: Vec<u8>) -> Result<Vec<u8>, String> {
 }
 
 pub fn wii_decode(rom: Vec<u8>) -> Wad {
-    let mut x = wii::decode::Parser::new(rom);
+    let mut x = wii::wad::Parser::new(rom);
     x.decode()
 }
 
 pub fn wii_encode(wad: Wad) -> Vec<u8> {
-    let mut x = wii::decode::Encoder::new(wad);
+    let mut x = wii::wad::Encoder::new(wad);
     x.encode()
 }
 
@@ -38,7 +38,7 @@ mod tests {
     fn test_wii_decode() {
         let wad = std::fs::read("tests/test.wad").unwrap();
         let w = wii_decode(wad.clone());
-        let mut x = wii::decode::Encoder::new(w);
+        let mut x = wii::wad::Encoder::new(w);
         let v = x.encode();
         std::fs::write("OUT.wad", &v).unwrap();
 
