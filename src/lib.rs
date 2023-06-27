@@ -54,4 +54,14 @@ mod tests {
         //std::fs::write("out.bin", p.pack(out)).unwrap()
         assert_eq!(content5, p.pack(out));
     }
+
+    #[test]
+    fn test_romc() {
+        let f = std::fs::read("tests/rom.z64").unwrap();
+        let mut r = wii::romc::Romc::new();
+        let comp = r.encode(&f);
+        let mut r = wii::romc::Romc::new();
+        let decomp = r.decode(&comp);
+        assert_eq!(f, decomp);
+    }
 }
