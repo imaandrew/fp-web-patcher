@@ -286,6 +286,7 @@ impl Parser {
         assert_eq!(self.index - x, self.wad.header.tmd_size as usize);
         self.align(0x40);
 
+        let x = self.index;
         for i in 0..self.wad.tmd.contents.len() {
             let size = self.wad.tmd.contents[i].size;
 
@@ -303,6 +304,7 @@ impl Parser {
             self.wad.contents.push(out);
             self.align(0x40);
         }
+        assert_eq!(self.index - x, self.wad.header.encrypted_data_size as usize);
 
         self.wad.footer = self.get_bytes(self.wad.header.footer_size as usize).into();
 
@@ -535,9 +537,7 @@ impl Parser {
     }
 
     fn align(&mut self, amt: usize) {
-        if self.index % amt != 0 {
-            self.index = amt * ((self.index / amt) + 1);
-        }
+        self.index = align_num(self.index, amt);
     }
 }
 
