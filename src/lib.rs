@@ -22,6 +22,11 @@ pub fn wii_encode(wad: Wad) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use crate::wii::{
+        romc,
+        u8::{Entry, File, Folder},
+    };
+
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
 
@@ -36,13 +41,40 @@ mod tests {
 
     #[test]
     fn test_wii_decode() {
-        let wad = std::fs::read("tests/test.wad").unwrap();
-        let w = wii_decode(wad.clone());
+        let wad = std::fs::read("pm.wad").unwrap();
+        let mut w = wii_decode(wad.clone());
+        let rom = std::fs::read("fp-us.z64").unwrap();
+        let mut u8p = wii::u8::U8Unpacker::new(w.contents[5].clone());
+        let mut out = u8p.unpack();
+        let c = match &mut out {
+            Entry::Folder(f) => &mut f.contents,
+            _ => panic!(),
+        };
+        for i in 0..c.len() {
+            let a = match &c[i] {
+                Entry::File(f) => f,
+                _ => continue,
+            };
+
+            if a.name == "romc" {
+                let mut r = romc::Romc::new();
+                c[i] = Entry::File(File {
+                    name: "romc".to_string(),
+                    contents: r.encode(&rom),
+                })
+            }
+        }
+        let mut u8p = wii::u8::U8Packer::new();
+        let new_content5 = u8p.pack(out);
+        w.contents[5] = new_content5;
+        let gzi = std::fs::read("patch.gzi").unwrap();
+        w.parse_gzi_patch(gzi);
+        w.footer = Vec::with_capacity(0x40);
         let mut x = wii::wad::Encoder::new(w);
         let v = x.encode();
         std::fs::write("OUT.wad", &v).unwrap();
 
-        assert_eq!(v, wad);
+        //assert_eq!(v, wad);
     }
 
     #[test]

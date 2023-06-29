@@ -7,14 +7,14 @@ pub enum Entry {
 
 #[derive(Debug)]
 pub struct File {
-    name: String,
-    contents: Vec<u8>,
+    pub name: String,
+    pub contents: Vec<u8>,
 }
 
 #[derive(Debug)]
 pub struct Folder {
-    name: String,
-    contents: Vec<Entry>,
+    pub name: String,
+    pub contents: Vec<Entry>,
 }
 
 #[derive(Debug)]

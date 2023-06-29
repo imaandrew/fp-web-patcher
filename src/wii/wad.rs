@@ -18,8 +18,8 @@ pub struct Wad {
     ticket: Ticket,
     tmd: Title,
     dec_title_key: [u8; 16],
-    contents: Vec<Vec<u8>>,
-    footer: Vec<u8>,
+    pub contents: Vec<Vec<u8>>,
+    pub footer: Vec<u8>,
 }
 
 impl Wad {
@@ -38,8 +38,51 @@ impl Wad {
     fn recalc_hashes(&mut self) {
         let mut hasher = Sha1::new();
         for i in 0..self.contents.len() {
+            align(&mut self.contents[i], 0x10);
+            self.tmd.contents[i].size = self.contents[i].capacity() as u64;
             hasher.update(&self.contents[i]);
             self.tmd.contents[i].hash = hasher.finalize_reset().into();
+        }
+    }
+
+    pub fn parse_gzi_patch(&mut self, patch: Vec<u8>) {
+        let lines = patch.split(|&b| b == b'\n');
+        let mut file: Option<u32> = None;
+
+        for line in lines {
+            if line.starts_with(&[b'#']) {
+                continue;
+            }
+
+            let parts: Vec<&[u8]> = line.split(|&byte| byte == b' ').collect();
+            let cmd = u16::from_str_radix(std::str::from_utf8(parts.get(0).unwrap()).unwrap(), 16)
+                .unwrap();
+            let size = (cmd & 0xff) as usize;
+            let cmd = cmd >> 8;
+            let offset =
+                u32::from_str_radix(std::str::from_utf8(parts.get(1).unwrap()).unwrap(), 16)
+                    .unwrap() as usize;
+            let data = u32::from_str_radix(std::str::from_utf8(parts.get(2).unwrap()).unwrap(), 16)
+                .unwrap();
+
+            match cmd {
+                0 => file = Some(data),
+                1 | 2 => panic!("lz77 compression not supported"),
+                3 => {
+                    let data = match size {
+                        1 => data & 0xff,
+                        2 => data & 0xffff,
+                        4 => data,
+                        _ => panic!(),
+                    };
+
+                    self.contents[file.unwrap() as usize].splice(
+                        offset..offset + size,
+                        data.to_be_bytes()[4 - size..].to_vec(),
+                    );
+                }
+                _ => panic!("Invalid command"),
+            }
         }
     }
 }
@@ -250,12 +293,11 @@ impl Parser {
             iv[..2].copy_from_slice(&self.wad.tmd.contents[i].index);
             let title_key = self.wad.dec_title_key;
             let contents = self.get_bytes_aligned(size as usize, 0x10);
-            let mut out = Aes128CbcDec::new(&title_key.into(), &iv.into())
+            let out = Aes128CbcDec::new(&title_key.into(), &iv.into())
                 .decrypt_padded_vec_mut::<NoPadding>(contents)
                 .unwrap();
-            out.truncate(size as usize);
             let mut hasher = Sha1::new();
-            hasher.update(&out);
+            hasher.update(&out[..size as usize]);
             let result = hasher.finalize();
             assert_eq!(result, self.wad.tmd.contents[i].hash.into());
             self.wad.contents.push(out);
@@ -536,6 +578,7 @@ impl Encoder {
 
         for mut c in contents {
             out.append(&mut c);
+            align(&mut out, 0x40);
         }
 
         out.append(&mut self.wad.footer);
@@ -636,10 +679,9 @@ impl Encoder {
             iv[..2].copy_from_slice(&self.wad.tmd.contents[i].index);
             let title_key = self.wad.dec_title_key;
             let contents = &self.wad.contents[i];
-            let mut content = Aes128CbcEnc::new(&title_key.into(), &iv.into())
+            let content = Aes128CbcEnc::new(&title_key.into(), &iv.into())
                 .encrypt_padded_vec_mut::<ZeroPadding>(contents);
-            align(&mut content, 0x40);
-            len += content.len();
+            len += align_num(content.len(), 0x40);
             c.push(content);
         }
 
@@ -648,11 +690,15 @@ impl Encoder {
 
     fn encrypt_title_key(&mut self) {
         let mut iv = [0; 16];
+        self.wad.ticket.title_key = [
+            0x47, 0x5a, 0x49, 0x73, 0x4c, 0x69, 0x66, 0x65, 0x41, 0x6e, 0x64, 0x42, 0x65, 0x65,
+            0x72, 0x21,
+        ];
         iv[..8].copy_from_slice(&self.wad.ticket.title_id[..]);
 
         let mut buf = [0u8; 16];
-        self.wad.ticket.title_key = Aes128CbcEnc::new(&COMMON_KEY.into(), &iv.into())
-            .encrypt_padded_b2b_mut::<NoPadding>(&self.wad.dec_title_key, &mut buf)
+        self.wad.dec_title_key = Aes128CbcDec::new(&COMMON_KEY.into(), &iv.into())
+            .decrypt_padded_b2b_mut::<NoPadding>(&self.wad.ticket.title_key, &mut buf)
             .unwrap()
             .try_into()
             .unwrap();
@@ -674,5 +720,13 @@ fn encode_u64(vec: &mut Vec<u8>, val: u64) {
 fn align(vec: &mut Vec<u8>, amt: usize) {
     if vec.len() % amt != 0 {
         vec.resize(amt * ((vec.len() / amt) + 1), 0);
+    }
+}
+
+fn align_num(num: usize, amt: usize) -> usize {
+    if num % amt != 0 {
+        amt * ((num / amt) + 1)
+    } else {
+        num
     }
 }
