@@ -4,9 +4,9 @@ use super::{
     read_byte, read_bytes, read_int,
 };
 
-pub struct VCDiffDecoder {
-    input: Vec<u8>,
-    source: Vec<u8>,
+pub struct VCDiffDecoder<'a> {
+    input: &'a Vec<u8>,
+    source: &'a Vec<u8>,
     output: Vec<u8>,
     index: usize,
     window_header: WindowHeader,
@@ -45,8 +45,8 @@ const VCD_DATACOMP: u8 = 1;
 const VCD_INSTCOMP: u8 = 2;
 const VCD_ADDRCOMP: u8 = 4;
 
-impl VCDiffDecoder {
-    pub fn new(input: Vec<u8>, source: Vec<u8>) -> Self {
+impl<'a> VCDiffDecoder<'a> {
+    pub fn new(input: &'a Vec<u8>, source: &'a Vec<u8>) -> Self {
         VCDiffDecoder {
             input,
             source,
@@ -73,22 +73,22 @@ impl VCDiffDecoder {
     }
 
     pub fn decode(&mut self) -> Result<&[u8], &'static str> {
-        let header = read_bytes(3, &self.input, &mut self.index);
+        let header = read_bytes(3, self.input, &mut self.index);
         assert_eq!(*header, [0xd6, 0xc3, 0xc4]);
         self.seek(1);
 
-        let header_indicator = read_byte(&self.input, &mut self.index);
+        let header_indicator = read_byte(self.input, &mut self.index);
 
-        if header_indicator & VCD_DECOMPRESS != 0 && read_byte(&self.input, &mut self.index) != 0 {
+        if header_indicator & VCD_DECOMPRESS != 0 && read_byte(self.input, &mut self.index) != 0 {
             return Err("Compressed patches not supported");
         }
 
-        if header_indicator & VCD_CODETABLE != 0 && read_int(&self.input, &mut self.index) != 0 {
+        if header_indicator & VCD_CODETABLE != 0 && read_int(self.input, &mut self.index) != 0 {
             return Err("Custom code tables not supported");
         }
 
         if header_indicator & VCD_APPHEADER != 0 {
-            let len = read_int(&self.input, &mut self.index);
+            let len = read_int(self.input, &mut self.index);
             self.seek(len as usize);
         }
 
@@ -102,32 +102,32 @@ impl VCDiffDecoder {
     }
 
     fn decode_window_header(&mut self) -> Result<WindowHeader, &'static str> {
-        let window_indicator = read_byte(&self.input, &mut self.index);
+        let window_indicator = read_byte(self.input, &mut self.index);
         let source = if window_indicator & (VCD_SOURCE | VCD_TARGET) != 0 {
             (
-                read_int(&self.input, &mut self.index),
-                read_int(&self.input, &mut self.index),
+                read_int(self.input, &mut self.index),
+                read_int(self.input, &mut self.index),
             )
         } else {
             (0, 0)
         };
 
-        let delta_encoding_len = read_int(&self.input, &mut self.index);
+        let delta_encoding_len = read_int(self.input, &mut self.index);
         let start_index = self.index;
-        let target_window_len = read_int(&self.input, &mut self.index) as usize;
-        let delta_indicator = read_byte(&self.input, &mut self.index);
+        let target_window_len = read_int(self.input, &mut self.index) as usize;
+        let delta_indicator = read_byte(self.input, &mut self.index);
 
         if delta_indicator & (VCD_DATACOMP | VCD_INSTCOMP | VCD_ADDRCOMP) != 0 {
             return Err("Compressed patches not supported");
         }
 
-        let data_len = read_int(&self.input, &mut self.index) as usize;
-        let inst_len = read_int(&self.input, &mut self.index) as usize;
-        let addr_len = read_int(&self.input, &mut self.index) as usize;
+        let data_len = read_int(self.input, &mut self.index) as usize;
+        let inst_len = read_int(self.input, &mut self.index) as usize;
+        let addr_len = read_int(self.input, &mut self.index) as usize;
 
         let hash = if window_indicator & VCD_CHECKSUM != 0 {
             Some(u32::from_be_bytes(
-                match read_bytes(4, &self.input, &mut self.index).try_into() {
+                match read_bytes(4, self.input, &mut self.index).try_into() {
                     Ok(t) => t,
                     Err(_) => return Err("Invalid checksum"),
                 },
@@ -191,7 +191,7 @@ impl VCDiffDecoder {
 
     fn decode_instruction(&mut self, inst: Instruction, out: &mut Vec<u8>) {
         let size = if inst.size == 0 {
-            read_int(&self.input, &mut self.window.inst_index)
+            read_int(self.input, &mut self.window.inst_index)
         } else {
             inst.size
         } as usize;
@@ -216,11 +216,11 @@ impl VCDiffDecoder {
                     src_sgmt_len + out.len() as u32,
                     inst.mode,
                     &mut self.window.addr_index,
-                    &self.input,
+                    self.input,
                 );
                 if addr < src_sgmt_len {
                     let src_sgmt_pos = (self.window_header.source.1 + addr) as usize;
-                    for b in &mut self.source[src_sgmt_pos..src_sgmt_pos + size] {
+                    for b in &self.source[src_sgmt_pos..src_sgmt_pos + size] {
                         out.push(*b);
                     }
                 } else {

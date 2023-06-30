@@ -30,6 +30,22 @@ impl Entry {
             }
         }
     }
+
+    pub fn get_file_contents(&mut self) -> Result<&mut Vec<u8>, String> {
+        match self {
+            Entry::File(File { name: _, contents }) => Ok(contents),
+            _ => Err("File not found".to_string())
+        }
+    }
+
+    pub fn set_file_contents(&mut self, c: Vec<u8>) -> Result <(), String> {
+        match self {
+            Entry::File(File { name: _, contents }) => *contents = c,
+            _ => return Err("File not found".to_string())
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -45,8 +61,8 @@ pub struct Folder {
 }
 
 #[derive(Debug)]
-pub struct U8Unpacker {
-    data: Vec<u8>,
+pub struct U8Unpacker<'a> {
+    data: &'a Vec<u8>,
     index: usize,
     pub node_count: usize,
     pub str_table_index: usize,
@@ -54,8 +70,8 @@ pub struct U8Unpacker {
     num: usize,
 }
 
-impl U8Unpacker {
-    pub fn new(data: Vec<u8>) -> Self {
+impl<'a> U8Unpacker<'a> {
+    pub fn new(data: &'a Vec<u8>) -> Self {
         Self {
             data,
             index: 0,

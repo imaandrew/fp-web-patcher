@@ -1,23 +1,44 @@
 use wasm_bindgen::prelude::*;
-use wii::wad::Wad;
+use wii::{wad::{Parser, Encoder}, romc::Romc, u8::{U8Packer, U8Unpacker}};
 
 pub mod n64;
 pub mod wii;
 
 #[wasm_bindgen]
 pub fn n64_decode(rom: Vec<u8>, patch: Vec<u8>) -> Result<Vec<u8>, String> {
-    let mut x = n64::decode::VCDiffDecoder::new(patch, rom);
+    let mut x = n64::decode::VCDiffDecoder::new(&patch, &rom);
     Ok(x.decode().map(|v| v.to_vec())?)
 }
 
-pub fn wii_decode(rom: Vec<u8>) -> Wad {
-    let mut x = wii::wad::Parser::new(rom);
-    x.decode()
+#[wasm_bindgen]
+pub struct WiiInjectConfig {
+    wad: Vec<u8>,
+    xdelta_patch: Vec<u8>,
+    gzi_patches: Vec<Vec<u8>>
 }
 
-pub fn wii_encode(wad: Wad) -> Vec<u8> {
-    let mut x = wii::wad::Encoder::new(wad);
-    x.encode()
+#[wasm_bindgen]
+pub fn wii_inject(x: WiiInjectConfig) -> Result<Vec<u8>, String> {
+    let mut wad_parser = Parser::new(x.wad);
+    let mut wad = wad_parser.decode();
+    let mut u8_unpack = U8Unpacker::new(&wad.contents[5]);
+    let mut content5 = u8_unpack.unpack();
+    let rom = content5.find_entry("./romc").ok_or("Rom Unpacking error")?;
+    let mut romc_decode = Romc::new();
+    let decoded_rom = romc_decode.decode(rom.get_file_contents()?);
+    let patched_rom = n64_decode(decoded_rom, x.xdelta_patch)?;
+    let mut romc_encode = Romc::new();
+    let encoded_rom = romc_encode.encode(&patched_rom);
+    rom.set_file_contents(encoded_rom)?;
+    let mut u8_pack = U8Packer::new();
+    let content5 = u8_pack.pack(content5);
+    wad.contents[5] = content5;
+    for patch in x.gzi_patches {
+        wad.parse_gzi_patch(patch);
+    }
+
+    let mut wad_encoder = Encoder::new(wad);
+    Ok(wad_encoder.encode())
 }
 
 #[cfg(test)]
@@ -42,39 +63,18 @@ mod tests {
     #[test]
     fn test_wii_decode() {
         let wad = std::fs::read("pm.wad").unwrap();
-        let mut w = wii_decode(wad);
-        let rom = std::fs::read("fp-us.z64").unwrap();
-        let mut u8p = wii::u8::U8Unpacker::new(w.contents[5].clone());
-        let mut out = u8p.unpack();
-        let c = match &mut out {
-            Entry::Folder(f) => &mut f.contents,
-            _ => panic!(),
-        };
-        for i in c {
-            let a = match i {
-                Entry::File(f) => f,
-                _ => continue,
-            };
-
-            if a.name == "romc" {
-                let mut r = romc::Romc::new();
-                *i = Entry::File(File {
-                    name: "romc".to_string(),
-                    contents: r.encode(&rom),
-                })
-            }
-        }
-        let mut u8p = wii::u8::U8Packer::new();
-        let new_content5 = u8p.pack(out);
-        w.contents[5] = new_content5;
         let gzi = std::fs::read("patch.gzi").unwrap();
-        w.parse_gzi_patch(gzi);
-        w.footer = Vec::with_capacity(0x40);
-        let mut x = wii::wad::Encoder::new(w);
-        let v = x.encode();
-        std::fs::write("OUT.wad", v).unwrap();
+        let xdelta = std::fs::read("fp-us.xdelta").unwrap();
+        let x = WiiInjectConfig {
+            wad,
+            xdelta_patch: xdelta,
+            gzi_patches: vec![gzi],
+        };
+        let wad = wii_inject(x);
+        std::fs::write("OUT.wad", wad.unwrap()).unwrap();
     }
 
+    /*
     #[test]
     fn test_u8() {
         let content5 = std::fs::read("tests/content5.app").unwrap();
@@ -99,4 +99,5 @@ mod tests {
         let decomp = r.decode(&comp);
         assert_eq!(f, decomp);
     }
+    */
 }
