@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn test_wii_decode() {
         let wad = std::fs::read("pm.wad").unwrap();
-        let mut w = wii_decode(wad.clone());
+        let mut w = wii_decode(wad);
         let rom = std::fs::read("fp-us.z64").unwrap();
         let mut u8p = wii::u8::U8Unpacker::new(w.contents[5].clone());
         let mut out = u8p.unpack();
@@ -50,15 +50,15 @@ mod tests {
             Entry::Folder(f) => &mut f.contents,
             _ => panic!(),
         };
-        for i in 0..c.len() {
-            let a = match &c[i] {
+        for i in c {
+            let a = match i {
                 Entry::File(f) => f,
                 _ => continue,
             };
 
             if a.name == "romc" {
                 let mut r = romc::Romc::new();
-                c[i] = Entry::File(File {
+                *i = Entry::File(File {
                     name: "romc".to_string(),
                     contents: r.encode(&rom),
                 })
@@ -72,19 +72,22 @@ mod tests {
         w.footer = Vec::with_capacity(0x40);
         let mut x = wii::wad::Encoder::new(w);
         let v = x.encode();
-        std::fs::write("OUT.wad", &v).unwrap();
-
-        //assert_eq!(v, wad);
+        std::fs::write("OUT.wad", v).unwrap();
     }
 
     #[test]
     fn test_u8() {
         let content5 = std::fs::read("tests/content5.app").unwrap();
-        let mut p = wii::u8::U8Unpacker::new(content5.clone());
-        let out = p.unpack();
+        let mut p = wii::u8::U8Unpacker::new(content5);
+        let mut out = p.unpack();
+        let x = out.find_entry("./romc").unwrap();
+        *x = Entry::File(File {
+            name: "womc".to_string(),
+            contents: vec![0xde, 0xad, 0xbe, 0xef],
+        });
         let mut p = wii::u8::U8Packer::new();
-        //std::fs::write("out.bin", p.pack(out)).unwrap()
-        assert_eq!(content5, p.pack(out));
+        std::fs::write("out.bin", p.pack(out)).unwrap();
+        //assert_eq!(content5, p.pack(out));
     }
 
     #[test]

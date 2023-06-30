@@ -5,6 +5,33 @@ pub enum Entry {
     None,
 }
 
+impl Entry {
+    pub fn find_entry(&mut self, path: &str) -> Option<&mut Entry> {
+        if let Some((name, remaining)) = path.split_once('/') {
+            match self {
+                Entry::File(_) => None,
+                Entry::Folder(Folder {
+                    name: folder_name,
+                    contents,
+                }) if *folder_name == name => {
+                    for entry in contents {
+                        if let Some(x) = entry.find_entry(remaining) {
+                            return Some(x);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        } else {
+            match self {
+                Entry::File(f) if f.name == path => Some(self),
+                _ => None,
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct File {
     pub name: String,
