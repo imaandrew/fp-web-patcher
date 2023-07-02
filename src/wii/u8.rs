@@ -100,7 +100,7 @@ impl<'a> U8Unpacker<'a> {
     }
 
     pub fn unpack(&mut self) -> Result<Entry, U8Error> {
-        if self.get_u32()? != 0x55aa382d && self.get_u32()? != 0x20 {
+        if self.get_u32()? != 0x55aa382d || self.get_u32()? != 0x20 {
             return Err(U8Error::InvalidHeader);
         }
 
