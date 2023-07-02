@@ -1,3 +1,19 @@
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum U8Error {
+    #[error("attempted to read `{0}` byte(s) out of bounds (index: `{1}, length: `{2}`)")]
+    IndexOutOfBounds(usize, usize, usize),
+    #[error("could not find file or folder at path: `{0}`")]
+    FileOrFolderNotFound(String),
+    #[error("entry is not a file")]
+    NotAFile,
+    #[error("invalid header")]
+    InvalidHeader,
+    #[error("invalid string, bytes: {0:x?}")]
+    InvalidString(Vec<u8>),
+}
+
 #[derive(Debug)]
 pub enum Entry {
     File(File),
@@ -6,42 +22,43 @@ pub enum Entry {
 }
 
 impl Entry {
-    pub fn find_entry(&mut self, path: &str) -> Option<&mut Entry> {
+    pub fn find_entry(&mut self, path: &str) -> Result<&mut Entry, U8Error> {
         if let Some((name, remaining)) = path.split_once('/') {
             match self {
-                Entry::File(_) => None,
+                Entry::File(_) => (),
                 Entry::Folder(Folder {
                     name: folder_name,
                     contents,
                 }) if *folder_name == name => {
                     for entry in contents {
-                        if let Some(x) = entry.find_entry(remaining) {
-                            return Some(x);
+                        if let Ok(x) = entry.find_entry(remaining) {
+                            return Ok(x);
                         }
                     }
-                    None
                 }
-                _ => None,
+                _ => (),
             }
         } else {
             match self {
-                Entry::File(f) if f.name == path => Some(self),
-                _ => None,
+                Entry::File(f) if f.name == path => return Ok(self),
+                _ => (),
             }
         }
+
+        Err(U8Error::FileOrFolderNotFound(path.to_string()))
     }
 
-    pub fn get_file_contents(&mut self) -> Result<&mut Vec<u8>, String> {
+    pub fn get_file_contents(&mut self) -> Result<&mut Vec<u8>, U8Error> {
         match self {
             Entry::File(File { name: _, contents }) => Ok(contents),
-            _ => Err("File not found".to_string())
+            _ => Err(U8Error::NotAFile),
         }
     }
 
-    pub fn set_file_contents(&mut self, c: Vec<u8>) -> Result <(), String> {
+    pub fn set_file_contents(&mut self, c: Vec<u8>) -> Result<(), U8Error> {
         match self {
             Entry::File(File { name: _, contents }) => *contents = c,
-            _ => return Err("File not found".to_string())
+            _ => return Err(U8Error::NotAFile),
         }
 
         Ok(())
@@ -82,66 +99,99 @@ impl<'a> U8Unpacker<'a> {
         }
     }
 
-    pub fn unpack(&mut self) -> Entry {
-        assert_eq!(self.get_u32(), 0x55aa382d);
-        assert_eq!(self.get_u32(), 0x20);
+    pub fn unpack(&mut self) -> Result<Entry, U8Error> {
+        if self.get_u32()? != 0x55aa382d && self.get_u32()? != 0x20 {
+            return Err(U8Error::InvalidHeader);
+        }
+
         self.seek(4);
-        self.data_index = self.get_u32() as usize;
+        self.data_index = self.get_u32()? as usize;
         self.seek(16 + 8);
-        self.node_count = self.get_u32() as usize - 1;
+        self.node_count = self.get_u32()? as usize - 1;
         self.str_table_index = self.index + self.node_count * 0xc;
 
         self.parse_entries()
     }
 
-    fn parse_entries(&mut self) -> Entry {
-        let ty = self.get_u16();
-        let name_offset = self.get_u16() as usize;
-        let data_offset = self.get_u32();
-        let size = self.get_u32();
+    fn parse_entries(&mut self) -> Result<Entry, U8Error> {
+        let ty = self.get_u16()?;
+        let name_offset = self.get_u16()? as usize;
+        let data_offset = self.get_u32()?;
+        let size = self.get_u32()?;
         self.num += 1;
 
         if ty == 0 {
-            Entry::File(File {
-                name: self.get_string(name_offset),
-                contents: self.data[data_offset as usize..(data_offset + size) as usize].to_vec(),
-            })
+            Ok(Entry::File(File {
+                name: self.get_string(name_offset)?,
+                contents: self
+                    .data
+                    .get(data_offset as usize..(data_offset + size) as usize)
+                    .ok_or(U8Error::IndexOutOfBounds(
+                        size as usize,
+                        data_offset as usize,
+                        self.data.len(),
+                    ))?
+                    .to_vec(),
+            }))
         } else if ty == 0x0100 {
             let mut contents = vec![];
             while self.num <= size as usize && self.num <= self.node_count {
-                contents.push(self.parse_entries());
+                contents.push(self.parse_entries()?);
             }
-            Entry::Folder(Folder {
-                name: self.get_string(name_offset),
+            Ok(Entry::Folder(Folder {
+                name: self.get_string(name_offset)?,
                 contents,
-            })
+            }))
         } else {
-            Entry::None
+            Ok(Entry::None)
         }
     }
 
-    fn get_bytes(&mut self, count: usize) -> &[u8] {
+    fn get_bytes(&mut self, count: usize) -> Result<&[u8], U8Error> {
         self.index += count;
-        &self.data[self.index - count..self.index]
+        self.data
+            .get(self.index - count..self.index)
+            .ok_or(U8Error::IndexOutOfBounds(
+                count,
+                self.index - count,
+                self.data.len(),
+            ))
     }
 
-    fn get_u16(&mut self) -> u16 {
-        u16::from_be_bytes(self.get_bytes(2).try_into().unwrap())
+    fn get_u16(&mut self) -> Result<u16, U8Error> {
+        Ok(u16::from_be_bytes(self.get_bytes(2)?.try_into().unwrap()))
     }
 
-    fn get_u32(&mut self) -> u32 {
-        u32::from_be_bytes(self.get_bytes(4).try_into().unwrap())
+    fn get_u32(&mut self) -> Result<u32, U8Error> {
+        Ok(u32::from_be_bytes(self.get_bytes(4)?.try_into().unwrap()))
     }
 
-    fn get_string(&mut self, start: usize) -> String {
+    fn get_string(&mut self, start: usize) -> Result<String, U8Error> {
         let mut i = self.str_table_index + start;
-        while self.data[i] != b'\0' {
+        while *self
+            .data
+            .get(i)
+            .ok_or(U8Error::IndexOutOfBounds(1, i, self.data.len()))?
+            != b'\0'
+        {
             i += 1;
         }
         i += 1;
 
-        String::from_utf8(self.data[self.str_table_index + start..i - 1].to_vec())
-            .unwrap_or("idk man".to_owned())
+        let bytes = self
+            .data
+            .get(self.str_table_index + start..i - 1)
+            .ok_or(U8Error::IndexOutOfBounds(1, i, self.data.len()))?
+            .to_vec();
+        String::from_utf8(bytes).map_err(|_| {
+            U8Error::InvalidString(
+                self.data
+                    .get(self.str_table_index + start..i - 1)
+                    .ok_or(U8Error::IndexOutOfBounds(1, i, self.data.len()))
+                    .unwrap()
+                    .to_vec(),
+            )
+        })
     }
 
     fn seek(&mut self, count: usize) {

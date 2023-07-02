@@ -3,6 +3,7 @@ use aes::cipher::{
     BlockDecryptMut, BlockEncryptMut, KeyIvInit,
 };
 use sha1::{Digest, Sha1};
+use thiserror::Error;
 
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -11,12 +12,30 @@ const COMMON_KEY: [u8; 16] = [
     0xeb, 0xe4, 0x2a, 0x22, 0x5e, 0x85, 0x93, 0xe4, 0x48, 0xd9, 0xc5, 0x45, 0x73, 0x81, 0xaa, 0xf7,
 ];
 
+#[derive(Error, Debug)]
+pub enum WadError {
+    #[error("attempted to read `{0}` byte(s) out of bounds (index: `{1}, length: `{2}`)")]
+    IndexOutOfBounds(usize, usize, usize),
+    #[error("invalid patch file")]
+    InvalidPatchFile,
+    #[error("lz77 compression/decompression not supported")]
+    UnsupportedLz77,
+    #[error("unexpected {0} size (expected: `{1}`, got: `{2}`)")]
+    UnexpectedSectionSize(String, u32, usize),
+    #[error("unexpected content {0} hash (expected: `{1}, got `{2}`)")]
+    UnexpectedContentHash(usize, String, String),
+    #[error("could not decrypt data")]
+    CouldNotDecrypt,
+    #[error("unexpected wad header (expected: `{0}`, got: `{1}`)")]
+    UnexpectedWadHeader(String, String),
+}
+
 #[derive(Clone, Debug)]
 pub struct Wad {
-    header: WadHeader,
-    cert_chain: Vec<Certificate>,
-    ticket: Ticket,
-    tmd: Title,
+    pub header: WadHeader,
+    pub cert_chain: Vec<Certificate>,
+    pub ticket: Ticket,
+    pub tmd: Title,
     dec_title_key: [u8; 16],
     pub contents: Vec<Vec<u8>>,
     pub footer: Vec<u8>,
@@ -35,60 +54,84 @@ impl Wad {
         }
     }
 
-    fn recalc_hashes(&mut self) {
+    fn recalc_hashes(&mut self) -> Result<(), WadError> {
         let mut hasher = Sha1::new();
         for i in 0..self.contents.len() {
             align(&mut self.contents[i], 0x10);
-            self.tmd.contents[i].size = self.contents[i].capacity() as u64;
+            let len = self.tmd.contents.len();
+            self.tmd
+                .contents
+                .get_mut(i)
+                .ok_or(WadError::IndexOutOfBounds(1, i, len))?
+                .size = self.contents[i].capacity() as u64;
             hasher.update(&self.contents[i]);
             self.tmd.contents[i].hash = hasher.finalize_reset().into();
         }
+
+        Ok(())
     }
 
-    pub fn parse_gzi_patch(&mut self, patch: Vec<u8>) {
+    pub fn parse_gzi_patch(&mut self, patch: &[u8]) -> Result<(), WadError> {
         let lines = patch.split(|&b| b == b'\n');
         let mut file: Option<u32> = None;
 
         for line in lines {
-            if line.starts_with(&[b'#']) {
+            if line.starts_with(&[b'#']) || line.is_empty() {
                 continue;
             }
 
             let parts: Vec<&[u8]> = line.split(|&byte| byte == b' ').collect();
-            let cmd = u16::from_str_radix(std::str::from_utf8(parts.get(0).unwrap()).unwrap(), 16)
-                .unwrap();
+            let cmd = u16::from_str_radix(
+                std::str::from_utf8(parts.get(0).ok_or(WadError::InvalidPatchFile)?)
+                    .map_err(|_| WadError::InvalidPatchFile)?,
+                16,
+            )
+            .map_err(|_| WadError::InvalidPatchFile)?;
             let size = (cmd & 0xff) as usize;
             let cmd = cmd >> 8;
-            let offset =
-                u32::from_str_radix(std::str::from_utf8(parts.get(1).unwrap()).unwrap(), 16)
-                    .unwrap() as usize;
-            let data = u32::from_str_radix(std::str::from_utf8(parts.get(2).unwrap()).unwrap(), 16)
-                .unwrap();
+            let offset = u32::from_str_radix(
+                std::str::from_utf8(parts.get(1).ok_or(WadError::InvalidPatchFile)?)
+                    .map_err(|_| WadError::InvalidPatchFile)?,
+                16,
+            )
+            .map_err(|_| WadError::InvalidPatchFile)? as usize;
+            let data = u32::from_str_radix(
+                std::str::from_utf8(parts.get(2).ok_or(WadError::InvalidPatchFile)?)
+                    .map_err(|_| WadError::InvalidPatchFile)?,
+                16,
+            )
+            .map_err(|_| WadError::InvalidPatchFile)?;
 
             match cmd {
                 0 => file = Some(data),
-                1 | 2 => panic!("lz77 compression not supported"),
+                1 | 2 => return Err(WadError::UnsupportedLz77),
                 3 => {
                     let data = match size {
                         1 => data & 0xff,
                         2 => data & 0xffff,
                         4 => data,
-                        _ => panic!(),
+                        _ => return Err(WadError::InvalidPatchFile),
                     };
 
-                    self.contents[file.unwrap() as usize].splice(
-                        offset..offset + size,
-                        data.to_be_bytes()[4 - size..].to_vec(),
-                    );
+                    let len = self.contents.len();
+                    self.contents
+                        .get_mut(file.ok_or(WadError::InvalidPatchFile)? as usize)
+                        .ok_or(WadError::IndexOutOfBounds(1, file.unwrap() as usize, len))?
+                        .splice(
+                            offset..offset + size,
+                            data.to_be_bytes()[4 - size..].to_vec(),
+                        );
                 }
-                _ => panic!("Invalid command"),
+                _ => return Err(WadError::InvalidPatchFile),
             }
         }
+
+        Ok(())
     }
 }
 
 #[derive(Clone, Debug)]
-struct Certificate {
+pub struct Certificate {
     sig_type: u32,
     sig_data: Vec<u8>,
     issuer: [u8; 64],
@@ -98,7 +141,7 @@ struct Certificate {
 }
 
 #[derive(Clone, Debug)]
-struct WadHeader {
+pub struct WadHeader {
     certificate_chain_size: u32,
     ticket_size: u32,
     tmd_size: u32,
@@ -119,7 +162,7 @@ impl WadHeader {
 }
 
 #[derive(Clone, Debug)]
-struct Ticket {
+pub struct Ticket {
     signed_blob_hdr: [u8; 0x140],
     sig_issuer: [u8; 0x40],
     ecdh_data: [u8; 0x3c],
@@ -174,9 +217,9 @@ struct CcLimit {
 }
 
 #[derive(Clone, Debug)]
-struct Title {
-    header: TitleHeader,
-    contents: Vec<ContentRecord>,
+pub struct Title {
+    pub header: TitleHeader,
+    pub contents: Vec<ContentRecord>,
 }
 
 impl Title {
@@ -189,7 +232,7 @@ impl Title {
 }
 
 #[derive(Clone, Debug)]
-struct TitleHeader {
+pub struct TitleHeader {
     signed_blob_hdr: [u8; 0x140],
     cert_issuer: [u8; 0x40],
     version: u8,
@@ -240,7 +283,7 @@ impl TitleHeader {
 }
 
 #[derive(Clone, Debug)]
-struct ContentRecord {
+pub struct ContentRecord {
     content_id: u32,
     index: [u8; 2],
     ty: u16,
@@ -248,165 +291,198 @@ struct ContentRecord {
     hash: [u8; 20],
 }
 
-pub struct Parser {
-    data: Vec<u8>,
+pub struct Parser<'a> {
+    data: &'a [u8],
     index: usize,
-    wad: Wad,
 }
 
-impl Parser {
-    pub fn new(data: Vec<u8>) -> Self {
-        Self {
-            data,
-            index: 0,
-            wad: Wad::new(),
-        }
+impl<'a> Parser<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, index: 0 }
     }
 
-    pub fn decode(&mut self) -> Wad {
-        self.wad.header = self.parse_wad_header();
+    pub fn decode(&mut self) -> Result<Wad, WadError> {
+        let mut wad = Wad::new();
+        wad.header = self.parse_wad_header()?;
         self.align(0x40);
         let x = self.index;
-        while self.index - x < self.wad.header.certificate_chain_size as usize {
-            let c = self.parse_cert_chain();
-            self.wad.cert_chain.push(c);
+        while self.index - x < wad.header.certificate_chain_size as usize {
+            let c = self.parse_cert_chain()?;
+            wad.cert_chain.push(c);
         }
-        assert_eq!(
-            self.index - x,
-            self.wad.header.certificate_chain_size as usize
-        );
+        if self.index - x != wad.header.certificate_chain_size as usize {
+            return Err(WadError::UnexpectedSectionSize(
+                "certificate chain".to_string(),
+                wad.header.certificate_chain_size,
+                self.index - x,
+            ));
+        }
         self.align(0x40);
         let x = self.index;
-        self.wad.ticket = self.parse_ticket();
-        assert_eq!(self.index - x, self.wad.header.ticket_size as usize);
+        wad.ticket = self.parse_ticket()?;
+        if self.index - x != wad.header.ticket_size as usize {
+            return Err(WadError::UnexpectedSectionSize(
+                "ticket".to_string(),
+                wad.header.ticket_size,
+                self.index - x,
+            ));
+        }
         self.align(0x40);
-        self.decrypt_title_key();
+        self.decrypt_title_key(&mut wad)?;
         let x = self.index;
-        self.wad.tmd = self.parse_title();
-        assert_eq!(self.index - x, self.wad.header.tmd_size as usize);
+        wad.tmd = self.parse_title()?;
+        if self.index - x != wad.header.tmd_size as usize {
+            return Err(WadError::UnexpectedSectionSize(
+                "tmd".to_string(),
+                wad.header.tmd_size,
+                self.index - x,
+            ));
+        }
         self.align(0x40);
 
         let x = self.index;
-        for i in 0..self.wad.tmd.contents.len() {
-            let size = self.wad.tmd.contents[i].size;
+        for i in 0..wad.tmd.contents.len() {
+            let size = wad.tmd.contents[i].size;
 
             let mut iv = [0; 16];
-            iv[..2].copy_from_slice(&self.wad.tmd.contents[i].index);
-            let title_key = self.wad.dec_title_key;
-            let contents = self.get_bytes_aligned(size as usize, 0x10);
+            iv[..2].copy_from_slice(&wad.tmd.contents[i].index);
+            let title_key = wad.dec_title_key;
+            let contents = self.get_bytes_aligned(size as usize, 0x10)?;
             let out = Aes128CbcDec::new(&title_key.into(), &iv.into())
                 .decrypt_padded_vec_mut::<NoPadding>(contents)
-                .unwrap();
+                .map_err(|_| WadError::CouldNotDecrypt)?;
             let mut hasher = Sha1::new();
-            hasher.update(&out[..size as usize]);
+            hasher.update(out.get(..size as usize).ok_or(WadError::IndexOutOfBounds(
+                size as usize,
+                0,
+                out.len(),
+            ))?);
             let result = hasher.finalize();
-            assert_eq!(result, self.wad.tmd.contents[i].hash.into());
-            self.wad.contents.push(out);
+            if result != wad.tmd.contents[i].hash.into() {
+                return Err(WadError::UnexpectedContentHash(
+                    i,
+                    hex::encode(wad.tmd.contents[i].hash),
+                    hex::encode(result),
+                ));
+            }
+            wad.contents.push(out);
             self.align(0x40);
         }
-        assert_eq!(self.index - x, self.wad.header.encrypted_data_size as usize);
+        if self.index - x != wad.header.encrypted_data_size as usize {
+            return Err(WadError::UnexpectedSectionSize(
+                "encrypted contents".to_string(),
+                wad.header.encrypted_data_size,
+                self.index - x,
+            ));
+        }
 
-        self.wad.footer = self.get_bytes(self.wad.header.footer_size as usize).into();
+        wad.footer = self.get_bytes(wad.header.footer_size as usize)?.into();
 
-        self.wad.clone()
+        Ok(wad)
     }
 
-    fn parse_cert_chain(&mut self) -> Certificate {
-        let sig_type = self.get_u32();
+    fn parse_cert_chain(&mut self) -> Result<Certificate, WadError> {
+        let sig_type = self.get_u32()?;
         let sig_len = match sig_type {
             0x10000 => 0x200,
             0x10001 => 0x100,
             0x10002 => 0x3c,
             _ => panic!("Invalid signature type"),
         };
-        let sig_data = self.get_bytes(sig_len).into();
+        let sig_data = self.get_bytes(sig_len)?.into();
         self.align(0x40);
-        let issuer = self.get_bytes(64).try_into().unwrap();
-        let key_type = self.get_u32();
-        let child_cert_identity = self.get_bytes(64).try_into().unwrap();
+        let issuer = self.get_bytes(64)?.try_into().unwrap();
+        let key_type = self.get_u32()?;
+        let child_cert_identity = self.get_bytes(64)?.try_into().unwrap();
         let pub_key_len = match key_type {
             0 => 0x23c,
             1 => 0x13c,
             2 => 0x78,
             _ => panic!("Invalid key type"),
         };
-        let pub_key = self.get_bytes(pub_key_len).into();
+        let pub_key = self.get_bytes(pub_key_len)?.into();
         self.align(0x40);
 
-        Certificate {
+        Ok(Certificate {
             sig_type,
             sig_data,
             issuer,
             key_type,
             child_cert_identity,
             pub_key,
-        }
+        })
     }
 
-    fn decrypt_title_key(&mut self) {
+    fn decrypt_title_key(&mut self, wad: &mut Wad) -> Result<(), WadError> {
         let mut iv = [0; 16];
-        iv[..8].copy_from_slice(&self.wad.ticket.title_id[..]);
+        iv[..8].copy_from_slice(&wad.ticket.title_id[..]);
 
         let mut buf = [0u8; 16];
-        self.wad.dec_title_key = Aes128CbcDec::new(&COMMON_KEY.into(), &iv.into())
-            .decrypt_padded_b2b_mut::<NoPadding>(&self.wad.ticket.title_key, &mut buf)
-            .unwrap()
+        wad.dec_title_key = Aes128CbcDec::new(&COMMON_KEY.into(), &iv.into())
+            .decrypt_padded_b2b_mut::<NoPadding>(&wad.ticket.title_key, &mut buf)
+            .map_err(|_| WadError::CouldNotDecrypt)?
             .try_into()
-            .unwrap();
+            .map_err(|_| WadError::CouldNotDecrypt)?;
+
+        Ok(())
     }
 
-    fn parse_wad_header(&mut self) -> WadHeader {
-        assert_eq!(
-            self.get_bytes(8),
-            &[0x00, 0x00, 0x00, 0x20, 0x49, 0x73, 0x00, 0x00]
-        );
-        let certificate_chain_size = self.get_u32();
+    fn parse_wad_header(&mut self) -> Result<WadHeader, WadError> {
+        let hdr = self.get_bytes(8)?;
+        let expected_hdr = &[0x00, 0x00, 0x00, 0x20, 0x49, 0x73, 0x00, 0x00];
+        if hdr != expected_hdr {
+            return Err(WadError::UnexpectedWadHeader(
+                hex::encode(hdr),
+                hex::encode(expected_hdr),
+            ));
+        }
+        let certificate_chain_size = self.get_u32()?;
         self.seek(0x04);
-        let ticket_size = self.get_u32();
-        let tmd_size = self.get_u32();
-        let encrypted_data_size = self.get_u32();
-        let footer_size = self.get_u32();
+        let ticket_size = self.get_u32()?;
+        let tmd_size = self.get_u32()?;
+        let encrypted_data_size = self.get_u32()?;
+        let footer_size = self.get_u32()?;
 
-        WadHeader {
+        Ok(WadHeader {
             certificate_chain_size,
             ticket_size,
             tmd_size,
             encrypted_data_size,
             footer_size,
-        }
+        })
     }
 
-    fn parse_ticket(&mut self) -> Ticket {
-        let signed_blob_hdr = self.get_bytes(0x140).try_into().unwrap();
-        let sig_issuer = self.get_bytes(0x40).try_into().unwrap();
-        let ecdh_data = self.get_bytes(0x3c).try_into().unwrap();
-        let ticket_format_ver = self.get_byte();
-        let unk_0x1bd = self.get_bytes(0x02).try_into().unwrap();
-        let title_key = self.get_bytes(0x10).try_into().unwrap();
-        let unk_0x1cf = self.get_byte();
-        let ticket_id = self.get_bytes(8).try_into().unwrap();
-        let console_id = self.get_u32();
-        let title_id = self.get_bytes(8).try_into().unwrap();
-        let unk_0x1e4 = self.get_bytes(2).try_into().unwrap();
-        let ticket_title_ver = self.get_u16();
-        let permitted_titles_mask = self.get_u32();
-        let permit_mask = self.get_u32();
-        let title_export_allowed = self.get_byte();
-        let common_key_index = self.get_byte();
-        let unk_0x1f2 = self.get_bytes(0x30).try_into().unwrap();
-        let content_access_perms = self.get_bytes(0x40).try_into().unwrap();
+    fn parse_ticket(&mut self) -> Result<Ticket, WadError> {
+        let signed_blob_hdr = self.get_bytes(0x140)?.try_into().unwrap();
+        let sig_issuer = self.get_bytes(0x40)?.try_into().unwrap();
+        let ecdh_data = self.get_bytes(0x3c)?.try_into().unwrap();
+        let ticket_format_ver = self.get_byte()?;
+        let unk_0x1bd = self.get_bytes(0x02)?.try_into().unwrap();
+        let title_key = self.get_bytes(0x10)?.try_into().unwrap();
+        let unk_0x1cf = self.get_byte()?;
+        let ticket_id = self.get_bytes(8)?.try_into().unwrap();
+        let console_id = self.get_u32()?;
+        let title_id = self.get_bytes(8)?.try_into().unwrap();
+        let unk_0x1e4 = self.get_bytes(2)?.try_into().unwrap();
+        let ticket_title_ver = self.get_u16()?;
+        let permitted_titles_mask = self.get_u32()?;
+        let permit_mask = self.get_u32()?;
+        let title_export_allowed = self.get_byte()?;
+        let common_key_index = self.get_byte()?;
+        let unk_0x1f2 = self.get_bytes(0x30)?.try_into().unwrap();
+        let content_access_perms = self.get_bytes(0x40)?.try_into().unwrap();
         self.seek(0x02);
 
         let mut limits = Vec::with_capacity(8);
 
         for _ in 0..8 {
             limits.push(CcLimit {
-                limit_type: self.get_u32(),
-                max_usage: self.get_u32(),
+                limit_type: self.get_u32()?,
+                max_usage: self.get_u32()?,
             });
         }
 
-        Ticket {
+        Ok(Ticket {
             signed_blob_hdr,
             sig_issuer,
             ecdh_data,
@@ -426,33 +502,33 @@ impl Parser {
             unk_0x1f2,
             content_access_perms,
             limits,
-        }
+        })
     }
 
-    fn parse_title_header(&mut self) -> TitleHeader {
-        let signed_blob_hdr = self.get_bytes(0x140).try_into().unwrap();
-        let cert_issuer = self.get_bytes(0x40).try_into().unwrap();
-        let version = self.get_byte();
-        let ca_crl_ver = self.get_byte();
-        let signer_crl_ver = self.get_byte();
-        let is_vwii = self.get_byte();
-        let sys_version = self.get_u64();
-        let title_id = self.get_bytes(8).try_into().unwrap();
-        let title_type = self.get_u32();
-        let group_id = self.get_u16();
+    fn parse_title_header(&mut self) -> Result<TitleHeader, WadError> {
+        let signed_blob_hdr = self.get_bytes(0x140)?.try_into().unwrap();
+        let cert_issuer = self.get_bytes(0x40)?.try_into().unwrap();
+        let version = self.get_byte()?;
+        let ca_crl_ver = self.get_byte()?;
+        let signer_crl_ver = self.get_byte()?;
+        let is_vwii = self.get_byte()?;
+        let sys_version = self.get_u64()?;
+        let title_id = self.get_bytes(8)?.try_into().unwrap();
+        let title_type = self.get_u32()?;
+        let group_id = self.get_u16()?;
         self.seek(2);
-        let region = self.get_u16();
-        let ratings = self.get_bytes(0x10).try_into().unwrap();
-        let unk_0x1ae = self.get_bytes(0x0c).try_into().unwrap();
-        let ipc_mask = self.get_bytes(0x0c).try_into().unwrap();
-        let unk_0x1c6 = self.get_bytes(0x12).try_into().unwrap();
-        let access_rights = self.get_u32();
-        let title_version = self.get_u16();
-        let num_contents = self.get_u16();
-        let boot_index = self.get_u16();
-        let minor_ver = self.get_u16();
+        let region = self.get_u16()?;
+        let ratings = self.get_bytes(0x10)?.try_into().unwrap();
+        let unk_0x1ae = self.get_bytes(0x0c)?.try_into().unwrap();
+        let ipc_mask = self.get_bytes(0x0c)?.try_into().unwrap();
+        let unk_0x1c6 = self.get_bytes(0x12)?.try_into().unwrap();
+        let access_rights = self.get_u32()?;
+        let title_version = self.get_u16()?;
+        let num_contents = self.get_u16()?;
+        let boot_index = self.get_u16()?;
+        let minor_ver = self.get_u16()?;
 
-        TitleHeader {
+        Ok(TitleHeader {
             signed_blob_hdr,
             cert_issuer,
             version,
@@ -473,63 +549,78 @@ impl Parser {
             num_contents,
             boot_index,
             minor_ver,
-        }
+        })
     }
 
-    fn parse_title(&mut self) -> Title {
-        let header = self.parse_title_header();
+    fn parse_title(&mut self) -> Result<Title, WadError> {
+        let header = self.parse_title_header()?;
         let mut contents = vec![];
 
         for _ in 0..header.num_contents {
-            contents.push(self.parse_contents());
+            contents.push(self.parse_contents()?);
         }
 
-        Title { header, contents }
+        Ok(Title { header, contents })
     }
 
-    fn parse_contents(&mut self) -> ContentRecord {
-        let content_id = self.get_u32();
-        let index = self.get_bytes(2).try_into().unwrap();
-        let ty = self.get_u16();
-        let size = self.get_u64();
-        let hash = self.get_bytes(20).try_into().unwrap();
+    fn parse_contents(&mut self) -> Result<ContentRecord, WadError> {
+        let content_id = self.get_u32()?;
+        let index = self.get_bytes(2)?.try_into().unwrap();
+        let ty = self.get_u16()?;
+        let size = self.get_u64()?;
+        let hash = self.get_bytes(20)?.try_into().unwrap();
 
-        ContentRecord {
+        Ok(ContentRecord {
             content_id,
             index,
             ty,
             size,
             hash,
-        }
+        })
     }
 
-    fn get_byte(&mut self) -> u8 {
+    fn get_byte(&mut self) -> Result<u8, WadError> {
         self.index += 1;
-        self.data[self.index - 1]
+        self.data
+            .get(self.index - 1)
+            .ok_or(WadError::IndexOutOfBounds(
+                1,
+                self.index - 1,
+                self.data.len(),
+            ))
+            .copied()
     }
 
-    fn get_bytes(&mut self, count: usize) -> &[u8] {
+    fn get_bytes(&mut self, count: usize) -> Result<&[u8], WadError> {
         self.index += count;
-        &self.data[self.index - count..self.index]
+        self.data
+            .get(self.index - count..self.index)
+            .ok_or(WadError::IndexOutOfBounds(
+                count,
+                self.index - count,
+                self.data.len(),
+            ))
     }
 
-    fn get_bytes_aligned(&mut self, count: usize, align: usize) -> &[u8] {
+    fn get_bytes_aligned(&mut self, count: usize, align: usize) -> Result<&[u8], WadError> {
         let i = self.index;
         self.index += count;
         self.align(align);
-        &self.data[i..self.index]
+        self.data
+            .get(i..self.index)
+            .ok_or(WadError::IndexOutOfBounds(count, i, self.data.len()))
     }
 
-    fn get_u16(&mut self) -> u16 {
-        u16::from_be_bytes(self.get_bytes(2).try_into().unwrap())
+    fn get_u16(&mut self) -> Result<u16, WadError> {
+        Ok(u16::from_be_bytes(self.get_bytes(2)?.try_into().unwrap()))
     }
 
-    fn get_u32(&mut self) -> u32 {
-        u32::from_be_bytes(self.get_bytes(4).try_into().unwrap())
+    fn get_u32(&mut self) -> Result<u32, WadError> {
+        Ok(u32::from_be_bytes(self.get_bytes(4)?.try_into().unwrap()))
     }
 
-    fn get_u64(&mut self) -> u64 {
-        u64::from_be_bytes(self.get_bytes(8).try_into().unwrap())
+    fn get_u64(&mut self) -> Result<u64, WadError> {
+        Ok(u64::from_be_bytes(self.get_bytes(8)?.try_into().unwrap()))
     }
 
     fn seek(&mut self, count: usize) {
@@ -541,22 +632,22 @@ impl Parser {
     }
 }
 
-pub struct Encoder {
-    wad: Wad,
+pub struct Encoder<'a> {
+    wad: &'a mut Wad,
 }
 
-impl Encoder {
-    pub fn new(wad: Wad) -> Self {
+impl<'a> Encoder<'a> {
+    pub fn new(wad: &'a mut Wad) -> Self {
         Self { wad }
     }
 
-    pub fn encode(&mut self) -> Vec<u8> {
-        self.wad.recalc_hashes();
-        self.encrypt_title_key();
+    pub fn encode(&mut self) -> Result<Vec<u8>, WadError> {
+        self.wad.recalc_hashes()?;
+        self.encrypt_title_key()?;
         let mut cert_chain = self.encode_cert_chain();
         let mut ticket = self.encode_ticket();
-        let mut tmd = self.encode_tmd();
-        let (contents, contents_len) = self.encode_contents();
+        let mut tmd = self.encode_tmd()?;
+        let (contents, contents_len) = self.encode_contents()?;
 
         let mut out = vec![];
         encode_u32(&mut out, 0x20);
@@ -584,7 +675,7 @@ impl Encoder {
         out.append(&mut self.wad.footer);
         align(&mut out, 0x40);
 
-        out
+        Ok(out)
     }
 
     fn encode_cert_chain(&mut self) -> Vec<u8> {
@@ -633,7 +724,7 @@ impl Encoder {
         tik
     }
 
-    fn encode_tmd(&mut self) -> Vec<u8> {
+    fn encode_tmd(&mut self) -> Result<Vec<u8>, WadError> {
         let mut tmd = vec![];
         let t = &self.wad.tmd.header;
         tmd.append(&mut t.signed_blob_hdr.into());
@@ -659,7 +750,16 @@ impl Encoder {
         encode_u16(&mut tmd, t.minor_ver);
 
         for i in 0..t.num_contents as usize {
-            let c = &self.wad.tmd.contents[i];
+            let c = &self
+                .wad
+                .tmd
+                .contents
+                .get(i)
+                .ok_or(WadError::IndexOutOfBounds(
+                    1,
+                    i,
+                    self.wad.tmd.contents.len(),
+                ))?;
             encode_u32(&mut tmd, c.content_id);
             tmd.append(&mut c.index.into());
             encode_u16(&mut tmd, c.ty);
@@ -667,10 +767,10 @@ impl Encoder {
             tmd.append(&mut c.hash.into());
         }
 
-        tmd
+        Ok(tmd)
     }
 
-    fn encode_contents(&mut self) -> (Vec<Vec<u8>>, usize) {
+    fn encode_contents(&mut self) -> Result<(Vec<Vec<u8>>, usize), WadError> {
         let mut c = vec![];
         let mut len = 0;
 
@@ -678,17 +778,21 @@ impl Encoder {
             let mut iv = [0; 16];
             iv[..2].copy_from_slice(&self.wad.tmd.contents[i].index);
             let title_key = self.wad.dec_title_key;
-            let contents = &self.wad.contents[i];
+            let contents = &self.wad.contents.get(i).ok_or(WadError::IndexOutOfBounds(
+                1,
+                i,
+                self.wad.contents.len(),
+            ))?;
             let content = Aes128CbcEnc::new(&title_key.into(), &iv.into())
                 .encrypt_padded_vec_mut::<ZeroPadding>(contents);
             len += align_num(content.len(), 0x40);
             c.push(content);
         }
 
-        (c, len)
+        Ok((c, len))
     }
 
-    fn encrypt_title_key(&mut self) {
+    fn encrypt_title_key(&mut self) -> Result<(), WadError> {
         let mut iv = [0; 16];
         self.wad.ticket.title_key = [
             0x47, 0x5a, 0x49, 0x73, 0x4c, 0x69, 0x66, 0x65, 0x41, 0x6e, 0x64, 0x42, 0x65, 0x65,
@@ -699,9 +803,11 @@ impl Encoder {
         let mut buf = [0u8; 16];
         self.wad.dec_title_key = Aes128CbcDec::new(&COMMON_KEY.into(), &iv.into())
             .decrypt_padded_b2b_mut::<NoPadding>(&self.wad.ticket.title_key, &mut buf)
-            .unwrap()
+            .map_err(|_| WadError::CouldNotDecrypt)?
             .try_into()
-            .unwrap();
+            .map_err(|_| WadError::CouldNotDecrypt)?;
+
+        Ok(())
     }
 }
 

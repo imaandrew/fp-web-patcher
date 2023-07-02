@@ -1,13 +1,12 @@
 use super::{
     cache::AddrCache,
     insts::{CodeTable, Instruction, Type},
-    read_byte, read_bytes, read_int,
+    read_byte, read_bytes, read_int, VCDiffDecoderError,
 };
 
 pub struct VCDiffDecoder<'a> {
-    input: &'a Vec<u8>,
-    source: &'a Vec<u8>,
-    output: Vec<u8>,
+    input: &'a [u8],
+    source: &'a [u8],
     index: usize,
     window_header: WindowHeader,
     window: Window,
@@ -46,11 +45,10 @@ const VCD_INSTCOMP: u8 = 2;
 const VCD_ADDRCOMP: u8 = 4;
 
 impl<'a> VCDiffDecoder<'a> {
-    pub fn new(input: &'a Vec<u8>, source: &'a Vec<u8>) -> Self {
+    pub fn new(input: &'a [u8], source: &'a [u8]) -> Self {
         VCDiffDecoder {
             input,
             source,
-            output: vec![],
             index: 0,
             window_header: WindowHeader {
                 source: (0, 0),
@@ -72,65 +70,74 @@ impl<'a> VCDiffDecoder<'a> {
         }
     }
 
-    pub fn decode(&mut self) -> Result<&[u8], &'static str> {
-        let header = read_bytes(3, self.input, &mut self.index);
-        assert_eq!(*header, [0xd6, 0xc3, 0xc4]);
+    pub fn decode(&mut self) -> Result<Vec<u8>, VCDiffDecoderError> {
+        let header = read_bytes(3, self.input, &mut self.index)?;
+        if *header != [0xd6, 0xc3, 0xc4] {
+            return Err(VCDiffDecoderError::InvalidHeader);
+        }
         self.seek(1);
 
-        let header_indicator = read_byte(self.input, &mut self.index);
+        let header_indicator = read_byte(self.input, &mut self.index)?;
 
-        if header_indicator & VCD_DECOMPRESS != 0 && read_byte(self.input, &mut self.index) != 0 {
-            return Err("Compressed patches not supported");
+        if header_indicator & VCD_DECOMPRESS != 0 && read_byte(self.input, &mut self.index)? != 0 {
+            return Err(VCDiffDecoderError::UnsupportedFeature(
+                "external compression".to_string(),
+            ));
         }
 
-        if header_indicator & VCD_CODETABLE != 0 && read_int(self.input, &mut self.index) != 0 {
-            return Err("Custom code tables not supported");
+        if header_indicator & VCD_CODETABLE != 0 && read_int(self.input, &mut self.index)? != 0 {
+            return Err(VCDiffDecoderError::UnsupportedFeature(
+                "custom code tables".to_string(),
+            ));
         }
 
         if header_indicator & VCD_APPHEADER != 0 {
-            let len = read_int(self.input, &mut self.index);
+            let len = read_int(self.input, &mut self.index)?;
             self.seek(len as usize);
         }
 
+        let mut out = vec![];
+
         while !self.at_end() {
             self.window_header = self.decode_window_header()?;
-            self.decode_window()?;
+            out.append(&mut self.decode_window()?);
             self.addr_cache = AddrCache::default();
         }
 
-        Ok(&self.output)
+        Ok(out)
     }
 
-    fn decode_window_header(&mut self) -> Result<WindowHeader, &'static str> {
-        let window_indicator = read_byte(self.input, &mut self.index);
+    fn decode_window_header(&mut self) -> Result<WindowHeader, VCDiffDecoderError> {
+        let window_indicator = read_byte(self.input, &mut self.index)?;
         let source = if window_indicator & (VCD_SOURCE | VCD_TARGET) != 0 {
             (
-                read_int(self.input, &mut self.index),
-                read_int(self.input, &mut self.index),
+                read_int(self.input, &mut self.index)?,
+                read_int(self.input, &mut self.index)?,
             )
         } else {
             (0, 0)
         };
 
-        let delta_encoding_len = read_int(self.input, &mut self.index);
+        let delta_encoding_len = read_int(self.input, &mut self.index)?;
         let start_index = self.index;
-        let target_window_len = read_int(self.input, &mut self.index) as usize;
-        let delta_indicator = read_byte(self.input, &mut self.index);
+        let target_window_len = read_int(self.input, &mut self.index)? as usize;
+        let delta_indicator = read_byte(self.input, &mut self.index)?;
 
         if delta_indicator & (VCD_DATACOMP | VCD_INSTCOMP | VCD_ADDRCOMP) != 0 {
-            return Err("Compressed patches not supported");
+            return Err(VCDiffDecoderError::UnsupportedFeature(
+                "secondary compression".to_string(),
+            ));
         }
 
-        let data_len = read_int(self.input, &mut self.index) as usize;
-        let inst_len = read_int(self.input, &mut self.index) as usize;
-        let addr_len = read_int(self.input, &mut self.index) as usize;
+        let data_len = read_int(self.input, &mut self.index)? as usize;
+        let inst_len = read_int(self.input, &mut self.index)? as usize;
+        let addr_len = read_int(self.input, &mut self.index)? as usize;
 
         let hash = if window_indicator & VCD_CHECKSUM != 0 {
             Some(u32::from_be_bytes(
-                match read_bytes(4, self.input, &mut self.index).try_into() {
-                    Ok(t) => t,
-                    Err(_) => return Err("Invalid checksum"),
-                },
+                read_bytes(4, self.input, &mut self.index)?
+                    .try_into()
+                    .unwrap(),
             ))
         } else {
             None
@@ -148,7 +155,7 @@ impl<'a> VCDiffDecoder<'a> {
         })
     }
 
-    fn decode_window(&mut self) -> Result<(), &'static str> {
+    fn decode_window(&mut self) -> Result<Vec<u8>, VCDiffDecoderError> {
         let data_index = self.index;
         let inst_index = self.window_header.data_len + data_index;
         let addr_index = self.window_header.inst_len + inst_index;
@@ -159,54 +166,88 @@ impl<'a> VCDiffDecoder<'a> {
             addr_index,
         };
 
-        assert_eq!(
-            self.window_header.delta_encoding_len as usize,
-            addr_index + self.window_header.addr_len + self.window_header.len - self.index
-        );
+        if self.window_header.delta_encoding_len as usize
+            != addr_index + self.window_header.addr_len + self.window_header.len - self.index
+        {
+            return Err(VCDiffDecoderError::UnexpectedWindowSize(
+                self.window_header.delta_encoding_len as usize,
+                addr_index + self.window_header.addr_len + self.window_header.len - self.index,
+            ));
+        }
 
         let mut out = Vec::with_capacity(self.window_header.target_window_len);
 
         self.index = addr_index + self.window_header.addr_len;
 
         while self.window.inst_index < addr_index {
-            let (inst1, inst2) = self.code_table.table[self.input[self.window.inst_index] as usize];
+            let (inst1, inst2) = *self
+                .code_table
+                .table
+                .get(*self.input.get(self.window.inst_index).ok_or(
+                    VCDiffDecoderError::IndexOutOfBounds(
+                        1,
+                        self.window.inst_index,
+                        self.input.len(),
+                    ),
+                )? as usize)
+                .ok_or(VCDiffDecoderError::IndexOutOfBounds(
+                    1,
+                    self.input[self.window.inst_index] as usize,
+                    self.code_table.table.len(),
+                ))?;
             self.window.inst_index += 1;
-            self.decode_instruction(inst1, &mut out);
+            self.decode_instruction(inst1, &mut out)?;
 
             if let Some(inst2) = inst2 {
-                self.decode_instruction(inst2, &mut out);
+                self.decode_instruction(inst2, &mut out)?;
             };
         }
 
         let a = adler32::RollingAdler32::from_buffer(&out);
         if let Some(hash) = self.window_header.hash {
-            if a.hash() != hash {
-                return Err("Checksum doesn't match decoded data");
+            let exp = a.hash();
+            if exp != hash {
+                return Err(VCDiffDecoderError::InvalidChecksum(exp, hash));
             }
         }
-        self.output.append(&mut out);
 
-        Ok(())
+        Ok(out)
     }
 
-    fn decode_instruction(&mut self, inst: Instruction, out: &mut Vec<u8>) {
+    fn decode_instruction(
+        &mut self,
+        inst: Instruction,
+        out: &mut Vec<u8>,
+    ) -> Result<(), VCDiffDecoderError> {
         let size = if inst.size == 0 {
-            read_int(self.input, &mut self.window.inst_index)
+            read_int(self.input, &mut self.window.inst_index)?
         } else {
             inst.size
         } as usize;
 
         match inst.ty {
             Type::Run => {
-                let b = self.input[self.window.data_index];
+                let b = self.input.get(self.window.data_index).ok_or(
+                    VCDiffDecoderError::IndexOutOfBounds(
+                        1,
+                        self.window.data_index,
+                        self.input.len(),
+                    ),
+                )?;
                 self.window.data_index += 1;
                 for _ in 0..size {
-                    out.push(b);
+                    out.push(*b);
                 }
             }
             Type::Add => {
                 self.window.data_index += size;
-                self.input[self.window.data_index - size..self.window.data_index]
+                self.input
+                    .get(self.window.data_index - size..self.window.data_index)
+                    .ok_or(VCDiffDecoderError::IndexOutOfBounds(
+                        size,
+                        self.window.data_index - size,
+                        self.input.len(),
+                    ))?
                     .iter()
                     .for_each(|x| out.push(*x));
             }
@@ -217,21 +258,31 @@ impl<'a> VCDiffDecoder<'a> {
                     inst.mode,
                     &mut self.window.addr_index,
                     self.input,
-                );
+                )?;
                 if addr < src_sgmt_len {
                     let src_sgmt_pos = (self.window_header.source.1 + addr) as usize;
-                    for b in &self.source[src_sgmt_pos..src_sgmt_pos + size] {
+                    for b in self.source.get(src_sgmt_pos..src_sgmt_pos + size).ok_or(
+                        VCDiffDecoderError::IndexOutOfBounds(size, src_sgmt_pos, self.source.len()),
+                    )? {
                         out.push(*b);
                     }
                 } else {
                     let addr = addr - src_sgmt_len;
                     for i in addr..(addr + size as u32) {
-                        let b = out[i as usize];
-                        out.push(b);
+                        let b = out
+                            .get(i as usize)
+                            .ok_or(VCDiffDecoderError::IndexOutOfBounds(
+                                1,
+                                i as usize,
+                                out.len(),
+                            ))?;
+                        out.push(*b);
                     }
                 }
             }
         }
+
+        Ok(())
     }
 
     fn seek(&mut self, num: usize) {
