@@ -22,10 +22,11 @@ impl From<WadError> for String {
 
 pub mod n64;
 pub mod wii;
+pub mod wiiu;
 
 #[wasm_bindgen]
-pub fn n64_decode(rom: Vec<u8>, patch: &[u8]) -> Result<Vec<u8>, String> {
-    let mut x = n64::decode::VCDiffDecoder::new(patch, &rom);
+pub fn n64_decode(rom: &[u8], patch: &[u8]) -> Result<Vec<u8>, String> {
+    let mut x = n64::decode::VCDiffDecoder::new(patch, rom);
     x.decode().map_err(|e| format!("n64 error: {}", e))
 }
 
@@ -49,7 +50,7 @@ pub fn wii_inject(s: JsValue) -> Result<Vec<u8>, String> {
     let rom = content5.find_entry("./romc")?;
     let mut romc_decode = Romc::new();
     let decoded_rom = romc_decode.decode(rom.get_file_contents()?);
-    let patched_rom = n64_decode(decoded_rom, &s.xdelta_patch)?;
+    let patched_rom = n64_decode(&decoded_rom, &s.xdelta_patch)?;
     let mut romc_encode = Romc::new();
     let encoded_rom = romc_encode.encode(&patched_rom);
     rom.set_file_contents(encoded_rom)?;
@@ -60,4 +61,22 @@ pub fn wii_inject(s: JsValue) -> Result<Vec<u8>, String> {
 
     let mut wad_encoder = Encoder::new(&mut wad);
     Ok(wad_encoder.encode()?)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct WiiUInjectSettings {
+    input_archive: Vec<u8>,
+    xdelta_patch: Vec<u8>,
+    enable_dark_filter: bool,
+    enable_widescreen: bool,
+    config: Vec<u8>,
+    return_zip: bool,
+    frame_layout: Vec<u8>,
+}
+
+#[wasm_bindgen]
+pub fn wiiu_inject(s: JsValue) -> Vec<u8> {
+    panic::set_hook(Box::new(console_error_panic_hook::hook));
+    let mut s: WiiUInjectSettings = serde_wasm_bindgen::from_value(s).unwrap();
+    wiiu::patch(&mut s)
 }

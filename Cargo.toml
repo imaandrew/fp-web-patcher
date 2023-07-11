@@ -1,6 +1,6 @@
 [package]
 name = "fp-web-patcher"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["imaandrew"]
 edition = "2021"
 description = "A wasm application that makes it easy to patch N64 roms for multiple platforms"
@@ -15,9 +15,12 @@ adler32 = "1.2.0"
 aes = "0.8.3"
 cbc = { version = "0.1.2", features = ["alloc"] }
 console_error_panic_hook = "0.1.7"
+crc = "3.0.1"
 hex = "0.4.3"
 serde = { version = "1.0.164", features = ["derive"] }
 serde-wasm-bindgen = "0.5.0"
 sha-1 = "0.10.1"
+tar = "0.4.38"
 thiserror = "1.0.40"
 wasm-bindgen = "0.2.87"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
