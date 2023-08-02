@@ -1,4 +1,3 @@
-use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::panic;
 use wasm_bindgen::prelude::*;
@@ -58,44 +57,12 @@ pub fn wii_inject(s: JsValue) -> Result<Vec<u8>, String> {
     let mut u8_pack = U8Packer::new();
     let content5 = u8_pack.pack(content5);
     wad.contents[5] = content5;
-    wad.ticket.title_id[4..].copy_from_slice(&s.channel_id.as_bytes()[..4]);
-    wad.tmd.header.title_id[4..].copy_from_slice(&s.channel_id.as_bytes()[..4]);
-    wad.tmd.header.region = 3;
+
+    wad.set_channel_id(&s.channel_id);
+    wad.set_channel_title(&s.title);
+    wad.set_region(3);
+
     wad.parse_gzi_patch(&s.gzi_patch)?;
-
-    let mut imetpos = -1;
-    for i in 0..wad.contents[0].len() - 4 {
-        if &wad.contents[0][i..i + 4] == "IMET".as_bytes() {
-            imetpos = i as isize;
-            break;
-        }
-    }
-
-    if imetpos != -1 {
-        let mut j = 0;
-        let cnamelen = s.title.len();
-        let mut name: [u8; 40] = [0; 40];
-
-        for count in 0..cnamelen {
-            name[j + 1] = s.title.as_bytes()[count];
-            j += 2;
-        }
-
-        let names = &mut wad.contents[0][imetpos as usize + 28..];
-        for i in 0..8 {
-            let names = &mut names[i * 84..i * 84 + 40];
-            names.copy_from_slice(&name);
-        }
-
-        for i in 0..16 {
-            wad.contents[0][0x630 + i] = 0;
-        }
-
-        let mut md5 = Md5::new();
-        md5.update(&wad.contents[0][64..0x640]);
-        let hash = md5.finalize();
-        wad.contents[0][0x630..0x640].copy_from_slice(&hash);
-    }
 
     let mut wad_encoder = Encoder::new(&mut wad);
     Ok(wad_encoder.encode()?)

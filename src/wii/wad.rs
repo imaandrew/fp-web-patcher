@@ -2,6 +2,7 @@ use aes::cipher::{
     block_padding::{NoPadding, ZeroPadding},
     BlockDecryptMut, BlockEncryptMut, KeyIvInit,
 };
+use md5::Md5;
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
@@ -128,6 +129,44 @@ impl Wad {
 
         Ok(())
     }
+
+    pub fn set_channel_id(&mut self, id: &str) {
+        self.ticket.title_id[4..].copy_from_slice(&id.as_bytes()[..4]);
+        self.tmd.header.title_id[4..].copy_from_slice(&id.as_bytes()[..4]);
+    }
+
+    pub fn set_channel_title(&mut self, title: &str) {
+        let imet_pos = self.contents[0]
+            .windows(4)
+            .position(|window| window == "IMET".as_bytes());
+
+        if let Some(imet_pos) = imet_pos {
+            let mut name = [0; 40];
+            for (i, byte) in title.bytes().enumerate() {
+                if i * 2 + 1 >= 40 {
+                    break;
+                }
+                name[i * 2 + 1] = byte;
+            }
+
+            let names = &mut self.contents[0][imet_pos + 28..];
+            let name_chunks = names.chunks_exact_mut(84);
+            for chunk in name_chunks.take(8) {
+                chunk[0..40].copy_from_slice(&name);
+            }
+
+            self.contents[0][0x630..0x640].fill(0);
+
+            let mut md5 = Md5::new();
+            md5.update(&self.contents[0][64..0x640]);
+            let hash = md5.finalize();
+            self.contents[0][0x630..0x640].copy_from_slice(&hash);
+        }
+    }
+
+    pub fn set_region(&mut self, region: u16) {
+        self.tmd.header.region = region;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -172,7 +211,7 @@ pub struct Ticket {
     unk_0x1cf: u8,
     ticket_id: [u8; 0x08],
     console_id: u32,
-    pub title_id: [u8; 0x08],
+    title_id: [u8; 0x08],
     unk_0x1e4: [u8; 0x02],
     ticket_title_ver: u16,
     permitted_titles_mask: u32,
@@ -240,10 +279,10 @@ pub struct TitleHeader {
     signer_crl_ver: u8,
     is_vwii: u8,
     sys_version: u64,
-    pub title_id: [u8; 8],
+    title_id: [u8; 8],
     title_type: u32,
     group_id: u16,
-    pub region: u16,
+    region: u16,
     ratings: [u8; 0x10],
     unk_0x1ae: [u8; 12],
     ipc_mask: [u8; 0x0c],
