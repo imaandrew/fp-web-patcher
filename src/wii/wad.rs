@@ -649,6 +649,8 @@ impl<'a> Encoder<'a> {
         let mut tmd = self.encode_tmd()?;
         let (contents, contents_len) = self.encode_contents()?;
 
+        trucha_sign(&mut ticket, 0);
+        trucha_sign(&mut tmd, 1);
         let mut out = vec![];
         encode_u32(&mut out, 0x20);
         encode_u16(&mut out, 0x4973);
@@ -808,6 +810,27 @@ impl<'a> Encoder<'a> {
             .map_err(|_| WadError::CouldNotDecrypt)?;
 
         Ok(())
+    }
+}
+
+fn trucha_sign(data: &mut [u8], ty: u8) {
+    let pos = if ty == 1 { 0x1d4 } else { 0x1f2 };
+
+    let mut hasher = Sha1::new();
+    hasher.update(&data[0x140..data.len() - 0x140]);
+
+    if hasher.finalize_reset()[0] != 0 {
+        for i in &mut data[4..260] {
+            *i = 0
+        }
+
+        for i in 0..0xFFFF {
+            data[pos..pos + 2].copy_from_slice(&(i as u16).to_be_bytes());
+            hasher.update(&data[0x140..data.len() - 0x140]);
+            if hasher.finalize_reset()[0] == 0 {
+                break;
+            }
+        }
     }
 }
 
