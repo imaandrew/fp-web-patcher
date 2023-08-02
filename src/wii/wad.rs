@@ -826,7 +826,7 @@ fn trucha_sign(data: &mut [u8], ty: u8) {
 
         for i in 0..0xFFFF {
             data[pos..pos + 2].copy_from_slice(&(i as u16).to_be_bytes());
-            hasher.update(&data[0x140..data.len() - 0x140]);
+            hasher.update(&data[0x140..data.len()]);
             if hasher.finalize_reset()[0] == 0 {
                 break;
             }
