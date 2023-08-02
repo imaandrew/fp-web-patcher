@@ -61,6 +61,7 @@ pub fn wii_inject(s: JsValue) -> Result<Vec<u8>, String> {
     wad.ticket.title_id[4..].copy_from_slice(&s.channel_id.as_bytes()[..4]);
     wad.tmd.header.title_id[4..].copy_from_slice(&s.channel_id.as_bytes()[..4]);
     wad.tmd.header.region = 3;
+    wad.parse_gzi_patch(&s.gzi_patch)?;
 
     let mut imetpos = -1;
     for i in 0..wad.contents[0].len() - 4 {
@@ -86,13 +87,15 @@ pub fn wii_inject(s: JsValue) -> Result<Vec<u8>, String> {
             names.copy_from_slice(&name);
         }
 
+        for i in 0..16 {
+            wad.contents[0][0x630 + i] = 0;
+        }
+
         let mut md5 = Md5::new();
-        md5.update(&wad.contents[0][64..64 + 1536]);
+        md5.update(&wad.contents[0][64..0x640]);
         let hash = md5.finalize();
         wad.contents[0][0x630..0x640].copy_from_slice(&hash);
     }
-
-    wad.parse_gzi_patch(&s.gzi_patch)?;
 
     let mut wad_encoder = Encoder::new(&mut wad);
     Ok(wad_encoder.encode()?)
