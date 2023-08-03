@@ -2,9 +2,13 @@ use aes::cipher::{
     block_padding::{NoPadding, ZeroPadding},
     BlockDecryptMut, BlockEncryptMut, KeyIvInit,
 };
+use bincode::Options;
 use md5::Md5;
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
+
+use crate::DolPatch;
 
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -29,6 +33,19 @@ pub enum WadError {
     CouldNotDecrypt,
     #[error("unexpected wad header (expected: `{0}`, got: `{1}`)")]
     UnexpectedWadHeader(String, String),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Dol {
+    text_offsets: [u32; 7],
+    data_offsets: [u32; 11],
+    text_load_addrs: [u32; 7],
+    data_load_addrs: [u32; 11],
+    text_sizes: [u32; 7],
+    data_sizes: [u32; 11],
+    bss_addr: u32,
+    bss_size: u32,
+    entry: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -64,7 +81,7 @@ impl Wad {
                 .contents
                 .get_mut(i)
                 .ok_or(WadError::IndexOutOfBounds(1, i, len))?
-                .size = self.contents[i].capacity() as u64;
+                .size = self.contents[i].len() as u64;
             hasher.update(&self.contents[i]);
             self.tmd.contents[i].hash = hasher.finalize_reset().into();
         }
@@ -115,19 +132,54 @@ impl Wad {
                     };
 
                     let len = self.contents.len();
-                    self.contents
-                        .get_mut(file.ok_or(WadError::InvalidPatchFile)? as usize)
-                        .ok_or(WadError::IndexOutOfBounds(1, file.unwrap() as usize, len))?
-                        .splice(
-                            offset..offset + size,
-                            data.to_be_bytes()[4 - size..].to_vec(),
-                        );
+                    let file = file.ok_or(WadError::InvalidPatchFile)?;
+                    let file = match file {
+                        100 | 101 | 102 => continue,
+                        _ => self
+                            .contents
+                            .get_mut(file as usize)
+                            .ok_or(WadError::IndexOutOfBounds(1, file as usize, len))?,
+                    };
+                    file[offset..offset + size].copy_from_slice(&data.to_be_bytes()[4 - size..]);
                 }
                 _ => return Err(WadError::InvalidPatchFile),
             }
         }
 
         Ok(())
+    }
+
+    pub fn patch_dol(&mut self, patch: DolPatch) {
+        let dol_hdr = &self.contents[patch.dol_num][..0xe4];
+        let options = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .with_big_endian();
+        let mut dol: Dol = options.deserialize(dol_hdr).unwrap();
+        let len = align_num(patch.data.len(), 16);
+        let mut inject_idx = 0;
+
+        for i in 0..7 {
+            if dol.text_offsets[i] == 0 {
+                inject_idx = i;
+                dol.text_sizes[i] = len as u32;
+                dol.text_load_addrs[i] = patch.load_addr;
+                dol.text_offsets[i] = dol.data_offsets[0];
+                let mut v = self.contents[patch.dol_num].split_off(dol.text_offsets[i] as usize);
+                self.contents[patch.dol_num].extend_from_slice(&patch.data);
+                self.contents[patch.dol_num].append(&mut v);
+                break;
+            }
+        }
+
+        for i in 0..11 {
+            if dol.data_offsets[i] != 0 {
+                dol.data_offsets[i] += dol.text_sizes[inject_idx];
+            }
+        }
+
+        let dol_hdr = &mut self.contents[patch.dol_num][..0xe4];
+        dol_hdr.copy_from_slice(&options.serialize(&dol).unwrap());
     }
 
     pub fn set_channel_id(&mut self, id: &str) {
@@ -278,7 +330,7 @@ pub struct TitleHeader {
     ca_crl_ver: u8,
     signer_crl_ver: u8,
     is_vwii: u8,
-    sys_version: u64,
+    pub sys_version: [u8; 8],
     title_id: [u8; 8],
     title_type: u32,
     group_id: u16,
@@ -303,7 +355,7 @@ impl TitleHeader {
             ca_crl_ver: 0,
             signer_crl_ver: 0,
             is_vwii: 0,
-            sys_version: 0,
+            sys_version: [0; 8],
             title_id: [0; 8],
             title_type: 0,
             group_id: 0,
@@ -551,7 +603,7 @@ impl<'a> Parser<'a> {
         let ca_crl_ver = self.get_byte()?;
         let signer_crl_ver = self.get_byte()?;
         let is_vwii = self.get_byte()?;
-        let sys_version = self.get_u64()?;
+        let sys_version = self.get_bytes(8)?.try_into().unwrap();
         let title_id = self.get_bytes(8)?.try_into().unwrap();
         let title_type = self.get_u32()?;
         let group_id = self.get_u16()?;
@@ -774,7 +826,7 @@ impl<'a> Encoder<'a> {
         tmd.push(t.ca_crl_ver);
         tmd.push(t.signer_crl_ver);
         tmd.push(t.is_vwii);
-        encode_u64(&mut tmd, t.sys_version);
+        tmd.append(&mut t.sys_version.into());
         tmd.append(&mut t.title_id.into());
         encode_u32(&mut tmd, t.title_type);
         encode_u16(&mut tmd, t.group_id);

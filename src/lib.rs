@@ -37,6 +37,14 @@ pub struct WiiInjectSettings {
     pub gzi_patch: Vec<u8>,
     pub channel_id: String,
     pub title: String,
+    pub dol_patch: DolPatch,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DolPatch {
+    pub dol_num: usize,
+    pub load_addr: u32,
+    pub data: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -61,8 +69,10 @@ pub fn wii_inject(s: JsValue) -> Result<Vec<u8>, String> {
     wad.set_channel_id(&s.channel_id);
     wad.set_channel_title(&s.title);
     wad.set_region(3);
+    wad.tmd.header.sys_version[7] = 0x3d;
 
     wad.parse_gzi_patch(&s.gzi_patch)?;
+    wad.patch_dol(s.dol_patch);
 
     let mut wad_encoder = Encoder::new(&mut wad);
     Ok(wad_encoder.encode()?)
