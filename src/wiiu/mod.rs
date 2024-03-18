@@ -50,12 +50,14 @@ pub fn patch(s: &mut WiiUInjectSettings) -> Vec<u8> {
                 let rom = patch_rom(data, &s.xdelta_patch);
                 file_writer.write_file("content/rom/UNMQE0.z64", &rom);
                 digest.update(&rom);
+                file_writer.write_file("content/config/UNMQE0.z64.ini", &s.config);
             }
             "content/rom/Unmqj0.716" => {
                 ver = Some(Ver::Jp);
                 let rom = patch_rom(data, &s.xdelta_patch);
                 file_writer.write_file("content/rom/UNMQJ0.z64", &rom);
                 digest.update(&rom);
+                file_writer.write_file("content/config/UNMQJ0.z64.ini", &s.config);
             }
             "code/app.xml" => app_cfg = Some(str::from_utf8(data).unwrap().to_string()),
             "meta/meta.xml" => meta_cfg = Some(str::from_utf8(data).unwrap().to_string()),
