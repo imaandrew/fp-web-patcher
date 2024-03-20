@@ -42,22 +42,25 @@ pub fn patch(s: &mut WiiUInjectSettings) -> Vec<u8> {
     let mut app_cfg = None;
     let mut meta_cfg = None;
     let crc = Crc::<u16>::new(&CRC_16_ARC);
-    let mut digest = crc.digest();
+    let mut rom_digest = crc.digest();
+    let mut cfg_digest = crc.digest();
     while let Some((ref path, ref data)) = cur_file {
         match &path[start_idx..] {
             "content/rom/UNMQE0.785" => {
                 ver = Some(Ver::Us);
                 let rom = patch_rom(data, &s.xdelta_patch);
                 file_writer.write_file("content/rom/UNMQE0.z64", &rom);
-                digest.update(&rom);
+                rom_digest.update(&rom);
                 file_writer.write_file("content/config/UNMQE0.z64.ini", &s.config);
+                cfg_digest.update(&s.config);
             }
             "content/rom/Unmqj0.716" => {
                 ver = Some(Ver::Jp);
                 let rom = patch_rom(data, &s.xdelta_patch);
                 file_writer.write_file("content/rom/UNMQJ0.z64", &rom);
-                digest.update(&rom);
+                rom_digest.update(&rom);
                 file_writer.write_file("content/config/UNMQJ0.z64.ini", &s.config);
+                cfg_digest.update(&s.config);
             }
             "code/app.xml" => app_cfg = Some(str::from_utf8(data).unwrap().to_string()),
             "meta/meta.xml" => meta_cfg = Some(str::from_utf8(data).unwrap().to_string()),
@@ -73,7 +76,7 @@ pub fn patch(s: &mut WiiUInjectSettings) -> Vec<u8> {
 
     let title_id = format!(
         "0005000264{:x}{:x}",
-        digest.finalize(),
+        ((rom_digest.finalize() as u32 + cfg_digest.finalize() as u32) >> 1) as u16,
         if s.enable_dark_filter { 0x80 } else { 0 }
             | if s.enable_widescreen { 0x40 } else { 0 }
             | 4
@@ -88,18 +91,20 @@ pub fn patch(s: &mut WiiUInjectSettings) -> Vec<u8> {
             meta_str = meta_str.replace("NACE", "NMQE");
             meta_str = meta_str.replace("Paper Mario", "fp-US");
             meta_str = meta_str.replace("00001997", &group_id);
+            meta_str = meta_str.replace("0005000010199700", &title_id);
             app_str = app_str.replace("00001997", &group_id);
+            app_str = app_str.replace("0005000010199700", &title_id);
         }
         Ver::Jp => {
             meta_str = meta_str.replace("NACJ", "NMQJ");
             meta_str = meta_str.replace("マリオストーリー", "fp-JP");
             meta_str = meta_str.replace("00001996", &group_id);
+            meta_str = meta_str.replace("0005000010199600", &title_id);
             app_str = app_str.replace("00001996", &group_id);
+            app_str = app_str.replace("0005000010199600", &title_id);
         }
     }
 
-    meta_str = meta_str.replace("0005000010199700", &title_id);
-    app_str = app_str.replace("0005000010199700", &title_id);
     file_writer.write_file("code/app.xml", app_str.as_bytes());
     file_writer.write_file("meta/meta.xml", meta_str.as_bytes());
 
