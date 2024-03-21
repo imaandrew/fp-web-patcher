@@ -1,6 +1,6 @@
 [package]
 name = "fp-web-patcher"
-version = "0.4.2"
+version = "0.4.3"
 authors = ["imaandrew"]
 edition = "2021"
 description = "A wasm application that makes it easy to patch N64 roms for multiple platforms"
