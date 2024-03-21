@@ -45,6 +45,11 @@ pub fn patch(s: &mut WiiUInjectSettings) -> Vec<u8> {
     let mut rom_digest = crc.digest();
     let mut cfg_digest = crc.digest();
     while let Some((ref path, ref data)) = cur_file {
+        if path.ends_with(".ini") || path.ends_with(".t64") {
+            cur_file = file_reader.next_file();
+            continue;
+        }
+
         match &path[start_idx..] {
             "content/rom/UNMQE0.785" => {
                 ver = Some(Ver::Us);
@@ -75,7 +80,7 @@ pub fn patch(s: &mut WiiUInjectSettings) -> Vec<u8> {
     }
 
     let title_id = format!(
-        "0005000264{:x}{:x}",
+        "0005000264{:X}{:02X}",
         ((rom_digest.finalize() as u32 + cfg_digest.finalize() as u32) >> 1) as u16,
         if s.enable_dark_filter { 0x80 } else { 0 }
             | if s.enable_widescreen { 0x40 } else { 0 }
