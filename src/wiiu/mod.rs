@@ -45,7 +45,7 @@ pub fn patch(s: &mut WiiUInjectSettings) -> Vec<u8> {
     let mut rom_digest = crc.digest();
     let mut cfg_digest = crc.digest();
     while let Some((ref path, ref data)) = cur_file {
-        if path.ends_with(".ini") || path.ends_with(".t64") {
+        if (path.ends_with(".ini") && !path.ends_with("config.ini")) || path.ends_with(".t64") {
             cur_file = file_reader.next_file();
             continue;
         }
