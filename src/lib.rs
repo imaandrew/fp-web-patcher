@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::panic;
 use wasm_bindgen::prelude::*;
 use wii::{
     romc::Romc,
@@ -26,6 +25,7 @@ pub mod wiiu;
 
 #[wasm_bindgen]
 pub fn n64_decode(rom: &[u8], patch: &[u8]) -> Result<Vec<u8>, String> {
+    console_error_panic_hook::set_once();
     let mut x = n64::decode::VCDiffDecoder::new(patch, rom);
     x.decode().map_err(|e| format!("n64 error: {}", e))
 }
@@ -49,7 +49,7 @@ pub struct DolPatch {
 
 #[wasm_bindgen]
 pub fn wii_inject(s: JsValue) -> Result<Vec<u8>, String> {
-    panic::set_hook(Box::new(console_error_panic_hook::hook));
+    console_error_panic_hook::set_once();
     let s: WiiInjectSettings = serde_wasm_bindgen::from_value(s).map_err(|_| "Invalid settings")?;
     let mut wad_parser = Parser::new(&s.wad);
     let mut wad = wad_parser.decode()?;
@@ -90,8 +90,8 @@ pub struct WiiUInjectSettings {
 }
 
 #[wasm_bindgen]
-pub fn wiiu_inject(s: JsValue) -> Vec<u8> {
-    panic::set_hook(Box::new(console_error_panic_hook::hook));
+pub fn wiiu_inject(s: JsValue) -> Result<Vec<u8>, String> {
+    console_error_panic_hook::set_once();
     let mut s: WiiUInjectSettings = serde_wasm_bindgen::from_value(s).unwrap();
-    wiiu::patch(&mut s)
+    wiiu::patch(&mut s).map_err(|e| format!("wiiu error: {}", e))
 }
